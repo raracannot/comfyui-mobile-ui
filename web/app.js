@@ -2167,19 +2167,17 @@
       .sort((a, b) => (midParentY(a) - midParentY(b)) || (a.pos[1] - b.pos[1]))));
 
     const colW = new Map();
-    const colH = new Map();
     keys.forEach((k) => {
-      const list = cols.get(k);
-      colW.set(k, Math.max(...list.map(nodeWidth)));
-      colH.set(k, list.reduce((s, n) => s + heightOf(n) + GAP_Y, -GAP_Y));
+      colW.set(k, Math.max(...cols.get(k).map(nodeWidth)));
     });
-    const tallest = Math.max(...keys.map((k) => colH.get(k)));
 
     lastLayout = nodes.map((n) => ({ id: n.id, pos: [n.pos[0], n.pos[1]] }));
 
+    /* Top-aligned: every column starts on the same line. Centring each column
+     * instead produces a diamond that reads as a different kind of diagram. */
     let x = 0;
     keys.forEach((k) => {
-      let y = (tallest - colH.get(k)) / 2;
+      let y = 0;
       cols.get(k).forEach((n) => {
         n.pos = [Math.round(x), Math.round(y)];
         y += heightOf(n) + GAP_Y;
@@ -2190,7 +2188,8 @@
     S.dirty = true;
     render();
     layoutLinks();
-    fitAll();
+    // fitAll alone would zoom out to ~0.15 on a wide graph and show grey mush
+    focusInitial();
     toast("已重排 " + nodes.length + " 个节点（可撤销）");
   }
 
@@ -2204,7 +2203,7 @@
     S.dirty = true;
     render();
     layoutLinks();
-    fitAll();
+    focusInitial();
     toast("已还原重排前的位置");
   }
 
