@@ -2751,7 +2751,16 @@
 
   let promptTarget = null;
   let promptRedraw = null;
-  const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  /* A stable per-item identity. Every write names one of these, so two devices
+   * touching different fragments cannot clobber each other. */
+  const uid = () => {
+    try {
+      if (window.crypto && crypto.randomUUID) {
+        return crypto.randomUUID().replace(/-/g, "").slice(0, 20);
+      }
+    } catch (_) {}
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  };
 
   async function loadPrompts(force) {
     if (S.prompts && !force) return S.prompts;
@@ -2801,15 +2810,47 @@
     }
   }
 
-  /** Queue a save for the change just made in memory; roll back if it fails. */
-  function applyPromptsLocal(rollback) {
-    if (!S.prompts) return;
-    promptSaveChain = promptSaveChain
-      .then(async () => {
-        const ok = await persistInPlace();
-        if (!ok && rollback) rollback();
-      })
+  /* ---- per-item operations -------------------------------------------------
+   * A whole-array write cannot tell "this device added an item" from "this
+   * device never saw it", so two phones always collided. Every change is now
+   * expressed as an operation naming one item by id; the server merges them,
+   * so edits to different fragments both survive. Ops are idempotent, which
+   * makes a retried request harmless. */
+
+  let promptOpChain = Promise.resolve();
+
+  function queuePromptOps(ops, rollback) {
+    if (!ops || !ops.length) return promptOpChain;
+    promptOpChain = promptOpChain
+      .then(() => sendPromptOps(ops, rollback))
       .catch(() => {});
+    return promptOpChain;
+  }
+
+  async function sendPromptOps(ops, rollback) {
+    try {
+      const res = await fetch(rel("api/prompts/ops"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ops }),
+      });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const out = await res.json();
+      if (out.error) throw new Error(out.error);
+      if (S.prompts) {
+        S.prompts.rev = out.rev;
+        // the server's merged view is the truth: it also carries changes made
+        // on another device since we last read the library
+        if (Array.isArray(out.items)) S.prompts.items = out.items;
+      }
+      if (promptRedraw) promptRedraw();
+      return true;
+    } catch (e) {
+      toast("保存失败：" + e.message, true);
+      if (rollback) rollback();
+      loadPrompts(true).then(() => { if (promptRedraw) promptRedraw(); });
+      return false;
+    }
   }
 
   async function persistPrompts(data) {
@@ -2890,11 +2931,13 @@
     // anything visible happened
     const data = await loadPrompts();
     const name = t.replace(/\s+/g, " ").slice(0, 18).replace(/\s\S*$/, "") || t.slice(0, 18);
-    data.items.unshift({
-      id: uid(), name, text: t, group: "未分组", tags: [], created: Date.now(), used: 0,
-    });
+    const item = {
+      id: uid(), name, text: t, group: "未分组", tags: [],
+      created: Date.now(), used: 0, updatedAt: Date.now(),
+    };
+    data.items.unshift(item);
 
-    const ok = await persistPrompts(data);
+    const ok = await sendPromptOps([{ op: "add", item }]);
     if (ok) {
       if (btn) {
         btn.textContent = "✓ 已存入";
@@ -2930,7 +2973,7 @@
     const isNew = !item;
     const draft = item
       ? Object.assign({}, item)
-      : { id: uid(), name: "", text: "", group: "未分组", tags: [], created: Date.now(), used: 0 };
+      : { id: uid(), name: "", text: "", group: "未分组", tags: [], created: Date.now(), used: 0, updatedAt: Date.now() };
 
     // the build callback and the save callback run at different times, so the
     // inputs have to live in this scope rather than inside build()
@@ -2977,7 +3020,7 @@
           }
           toast("已删除");
           openPanel("prompts");
-          applyPromptsLocal();
+          queuePromptOps([{ op: "delete", id: draft.id }]);
         };
         b.appendChild(del);
       }
@@ -2988,18 +3031,20 @@
       draft.name = (nameIn && nameIn.value.trim()) ||
         draft.text.replace(/\s+/g, " ").slice(0, 18) || "未命名";
       draft.group = (groupIn && groupIn.value.trim()) || "未分组";
+      draft.updatedAt = Date.now();
 
       /* Apply locally and leave the editor at once; the request follows.
        * The panel repaints from memory, so saving no longer waits on the
        * round trip before it closes. */
       const data = S.prompts;
+      const existed = data && data.items.some((x) => x.id === draft.id);
       if (data) {
         const i = data.items.findIndex((x) => x.id === draft.id);
         if (i >= 0) data.items[i] = draft; else data.items.unshift(draft);
       }
       toast("已保存");
       openPanel("prompts");
-      applyPromptsLocal();
+      queuePromptOps([{ op: existed ? "update" : "add", item: draft }]);
     });
   }
 
@@ -3008,7 +3053,9 @@
       const body = (b) => {
         let q = "";
         let group = "全部";
-        let items = [];          // rendered from memory; never refetched per keystroke
+        // always read through S.prompts: a background op response replaces the
+        // array, and a captured reference would go stale
+        const current = () => (S.prompts && S.prompts.items) || [];
         let debounce = 0;
 
         const search = document.createElement("input");
@@ -3038,7 +3085,8 @@
         };
 
         function draw() {
-          const groups = ["全部"].concat([...new Set(items.map((x) => x.group || "未分组"))]);
+          const all = current();
+          const groups = ["全部"].concat([...new Set(all.map((x) => x.group || "未分组"))]);
           chips.innerHTML = "";
           groups.forEach((g) => {
             const c = document.createElement("button");
@@ -3049,7 +3097,7 @@
           });
 
           const key = q.trim().toLowerCase();
-          const shown = items.filter((it) =>
+          const shown = all.filter((it) =>
             (group === "全部" || (it.group || "未分组") === group) &&
             (!key || (it.name + " " + it.text + " " + (it.tags || []).join(" "))
               .toLowerCase().includes(key)));
@@ -3057,7 +3105,7 @@
           list.innerHTML = "";
           if (!shown.length) {
             note.style.display = "";
-            note.innerHTML = items.length
+            note.innerHTML = all.length
               ? "没有匹配的片段。"
               : "词库还是空的。<br>点开一个文本节点 →「💾 存为片段」，或者点右上角「新建」。";
             return;
@@ -3197,11 +3245,10 @@
           /* Optimistic: the row goes away this frame, the request follows.
            * Waiting for the round trip is what made deleting feel slow. */
           const removed = data.items.splice(idx, 1)[0];
-          items = data.items;
           draw();
-          applyPromptsLocal(() => {
-            data.items.splice(Math.min(idx, data.items.length), 0, removed);
-            items = data.items;
+          queuePromptOps([{ op: "delete", id: removed.id }], () => {
+            const list = (S.prompts && S.prompts.items) || data.items;
+            list.splice(Math.min(idx, list.length), 0, removed);
             draw();
             toast("删除没保存成功，已恢复", true);
           });
@@ -3211,14 +3258,15 @@
         function restoreItem(item, idx) {
           const data = S.prompts;
           if (!data) return;
-          const at = Math.min(idx, data.items.length);
-          data.items.splice(at, 0, item);
-          items = data.items;
+          /* Undo re-adds the same item under the same id, so it merges back
+           * instead of creating a second copy on another device. */
+          const again = Object.assign({}, item, { updatedAt: Date.now() });
+          data.items.splice(Math.min(idx, data.items.length), 0, again);
           draw();
-          applyPromptsLocal(() => {
-            const k = data.items.findIndex((x) => x.id === item.id);
-            if (k >= 0) data.items.splice(k, 1);
-            items = data.items;
+          queuePromptOps([{ op: "add", item: again }], () => {
+            const list = (S.prompts && S.prompts.items) || data.items;
+            const k = list.findIndex((x) => x.id === again.id);
+            if (k >= 0) list.splice(k, 1);
             draw();
             toast("撤销没保存成功，已回退", true);
           });
@@ -3231,15 +3279,9 @@
            * memory, paint it at once and refresh in the background, redrawing
            * only when the revision actually moved. */
           const cached = S.prompts;
-          if (cached) {
-            items = cached.items || [];
-            draw();
-          }
+          if (cached) draw();
           const fresh = await loadPrompts(true);
-          if (!cached || fresh.rev !== cached.rev) {
-            items = fresh.items || [];
-            draw();
-          }
+          if (!cached || fresh.rev !== cached.rev) draw();
         }
 
         promptRedraw = draw;   // so a 409 on a background save can refresh us

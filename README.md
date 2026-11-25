@@ -234,12 +234,15 @@ python _dev/import_prompts.py _dev/seed_prompts.json --dry-run  # 只看会加�
 | GET | `/mobile/api/object_info` | 精简节点表（gzip，约 240KB，含 30 分钟缓存） |
 | GET | `/mobile/api/meta` | 版本、地址、配置状态 |
 | GET | `/mobile/api/outputs` | 输出文件列表（扫 `output/`，按时间倒序） |
-| GET/POST | `/mobile/api/prompts` | 提示词词库（读 / 写，写入带版本号，冲突返回 409） |
+| GET/POST | `/mobile/api/prompts` | 提示词词库（读 / 整表写，写入带版本号，冲突返回 409） |
+| POST | `/mobile/api/prompts/ops` | **按条目操作**（add / update / delete，只碰指定 id） |
 | GET | `/mobile/api/thumb` | 生成缩略图（`w=320`，WebP，磁盘缓存） |
 | POST | `/mobile/api/delete` | 删除输出（**仅 `output/` 与 `temp/`**，走回收站） |
 | GET/POST | `/mobile/api/debug/*` | 远端诊断通道（只读为主，动作白名单） |
 
 `/mobile/api/delete` 的安全边界：只允许删 `output/` 和 `temp/` 里的文件，`input/` 一律拒绝；路径必须精确匹配；单次上限 500 个；Windows 上通过 `SHFileOperationW` 送进回收站，删错了能还原。
+
+`/mobile/api/prompts/ops` 是词库的常规写入方式。每条操作只指定一个条目 id，服务端在**自己那份数据上**增删改，所以两台设备改不同条目时都能保留（整表写只能二选一：覆盖，或 409 让人重试）。操作是幂等的——重复提交同一条 add/delete 不会产生副本；同一条被改两次时按 `updatedAt` 取新的。
 
 ---
 

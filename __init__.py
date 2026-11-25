@@ -805,6 +805,7 @@ def _clean_item(it):
         "tags": [str(t)[:40] for t in tags[:12]],
         "created": int(it.get("created") or 0),
         "used": int(it.get("used") or 0),
+        "updatedAt": int(it.get("updatedAt") or 0),
     }
 
 
@@ -816,6 +817,119 @@ async def get_prompts(request):
         "file": PROMPT_FILE,
     })
 
+
+
+
+def _dedupe_ids(items):
+    """Item-level operations address entries by id, so ids must be unique.
+
+    A hand-edited file or a pasted library can carry duplicates; the second
+    occurrence would be unreachable by any operation, so give it a fresh id.
+    """
+    seen = set()
+    changed = False
+    for it in items:
+        pid = str(it.get("id") or "")
+        if not pid or pid in seen:
+            new = "fix-%x" % int(time.time() * 1000000 + len(seen))
+            while new in seen:
+                new += "x"
+            it["id"] = new
+            pid = new
+            changed = True
+        seen.add(pid)
+    return changed
+
+
+def _apply_prompt_ops(cur, ops):
+    """Merge item-level operations into the stored list.
+
+    Each operation names one item by id, so two devices editing different
+    entries both survive - which a whole-array PUT can never express. Ops are
+    idempotent (add replaces, delete of a missing id succeeds) so a retried
+    request cannot double-apply.
+    """
+    items = list(cur.get("items") or [])
+    index = {}
+    for i, it in enumerate(items):
+        pid = it.get("id")
+        if pid and pid not in index:
+            index[pid] = i
+
+    applied = 0
+    skipped = []
+
+    for op in ops[:2000]:
+        if not isinstance(op, dict):
+            skipped.append("bad op")
+            continue
+        kind = op.get("op")
+
+        if kind == "delete":
+            pid = str(op.get("id") or "")
+            at = index.get(pid)
+            if at is not None:
+                items[at] = None
+                index.pop(pid, None)
+            applied += 1          # already absent is the same end state
+            continue
+
+        if kind in ("add", "update"):
+            item = _clean_item(op.get("item") or {})
+            if not item:
+                skipped.append("bad item")
+                continue
+            at = index.get(item["id"])
+            if at is not None:
+                old = items[at] or {}
+                # same item edited twice: the newer timestamp wins, and an
+                # obvious rollback cannot clobber a fresher edit
+                if item["updatedAt"] and (item["updatedAt"] < int(old.get("updatedAt") or 0)):
+                    skipped.append(item["id"])
+                    continue
+                items[at] = item
+            else:
+                items.insert(0, item)   # newest first, matching the library order
+                index = {it["id"]: n for n, it in enumerate(items) if it}
+            applied += 1
+            continue
+
+        skipped.append("unknown op")
+
+    return [it for it in items if it], applied, skipped
+
+
+async def prompt_ops(request):
+    """Apply per-item operations; no base revision needed because nothing is
+    overwritten wholesale."""
+    bad = _guard(request)
+    if bad is not None:
+        return bad
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+
+    ops = body.get("ops")
+    if not isinstance(ops, list):
+        return web.json_response({"error": "ops 必须是数组"}, status=400)
+
+    cur = _read_prompts()
+    _dedupe_ids(cur.get("items") or [])
+    items, applied, skipped = _apply_prompt_ops(cur, ops)
+    data = {"rev": int(cur.get("rev", 0)) + 1, "items": items}
+    try:
+        _write_prompts(data)
+    except Exception as exc:
+        LOG.error("mobile_ui: cannot write prompts: %s", exc)
+        return web.json_response({"error": "写入失败: %s" % exc}, status=500)
+
+    return web.json_response({
+        "rev": data["rev"],
+        "items": items,
+        "applied": applied,
+        "skipped": skipped,
+    })
 
 async def save_prompts(request):
     bad = _guard(request)
@@ -944,6 +1058,7 @@ def _register():
     routes.get("/mobile/api/outputs")(list_outputs)
     routes.get("/mobile/api/prompts")(get_prompts)
     routes.post("/mobile/api/prompts")(save_prompts)
+    routes.post("/mobile/api/prompts/ops")(prompt_ops)
 
     routes.post("/mobile/api/debug/report")(debug_report)
     routes.get("/mobile/api/debug/state")(debug_state)
