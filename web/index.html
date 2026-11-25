@@ -1,0 +1,96 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0e1015">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ComfyUI">
+<meta name="format-detection" content="telephone=no">
+<title>ComfyUI 手机版</title>
+<link rel="stylesheet" href="a/app.css?v=16">
+<!--MUI_BOOT-->
+</head>
+<body>
+
+<div id="app">
+  <header id="topbar">
+    <button id="btnMenu" class="icon-btn" aria-label="菜单">
+      <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+    </button>
+    <div id="titleWrap">
+      <div id="wfName">加载中…</div>
+      <div id="wfSub">正在连接 ComfyUI</div>
+    </div>
+    <button id="btnRun" class="run-btn" aria-label="运行">
+      <svg viewBox="0 0 24 24" class="ic-play"><path d="M8 5.5v13l11-6.5z"/></svg>
+    </button>
+  </header>
+
+  <div id="progress"><i></i><b></b></div>
+
+  <main id="viewport">
+    <div id="world">
+      <svg id="links" xmlns="http://www.w3.org/2000/svg">
+        <g id="linkLayer"></g>
+      </svg>
+      <div id="nodes"></div>
+    </div>
+    <div id="hint">双指缩放 · 拖动节点 · 圆点连线</div>
+  </main>
+
+  <nav id="dock">
+    <button data-act="fit" class="dock-btn">
+      <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+      <span>适应</span>
+    </button>
+    <button data-act="add" class="dock-btn">
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+      <span>加节点</span>
+    </button>
+    <button data-act="nodelist" class="dock-btn">
+      <svg viewBox="0 0 24 24"><path d="M4 6h4v4H4zM12 7h8M4 14h4v4H4zM12 15h8"/></svg>
+      <span>节点</span>
+    </button>
+    <button data-act="gallery" class="dock-btn">
+      <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM4 15l4-4 4 4 3-3 5 5"/></svg>
+      <span>图库</span>
+    </button>
+  </nav>
+</div>
+
+<!-- bottom sheet: node inspector -->
+<div id="sheet" class="sheet" aria-hidden="true">
+  <div class="sheet-grip"></div>
+  <button id="sheetClose" class="sheet-close" aria-label="关闭">✕</button>
+  <div id="sheetHead" class="sheet-head">
+    <div class="sh-title">
+      <div id="shName">节点</div>
+      <div id="shType">—</div>
+    </div>
+    <div id="shModes" class="mode-row"></div>
+  </div>
+  <div id="sheetBody" class="sheet-body"></div>
+</div>
+<div id="scrim" class="scrim"></div>
+
+<!-- full-screen panel: workflows / gallery / queue / settings / node list -->
+<div id="panel" class="panel" aria-hidden="true">
+  <header class="panel-head">
+    <button id="panelBack" class="icon-btn" aria-label="返回">
+      <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+    </button>
+    <h2 id="panelTitle">面板</h2>
+    <button id="panelAction" class="text-btn"></button>
+  </header>
+  <div id="panelBody" class="panel-body"></div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="a/conv.js?v=16"></script>
+<script src="a/app.js?v=16"></script>
+</body>
+</html>
