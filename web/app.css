@@ -537,6 +537,9 @@ input[type="range"]::-webkit-slider-thumb {
   margin-top: 10px;
   background: linear-gradient(transparent, var(--bg) 30%);
 }
+/* .btn is width:100%, which in a flex row lets the first button eat the whole
+ * line and squeezes the second into a one-character column. */
+.gal-bar .btn { flex: 1 1 0; width: auto; min-width: 0; white-space: nowrap; }
 
 .lightbox {
   position: fixed; inset: 0; z-index: 70;
@@ -1051,3 +1054,8 @@ body[data-tool="marquee"] .tool-chip .tc-dot { background: #6ea8fe; box-shadow: 
 .prov-empty { color: var(--dim); padding: 16px 0; }
 .prov-hint { color: var(--dim2); font-size: 12px; margin-top: 8px; }
 .prov-act { margin-top: 18px; }
+
+/* 长按批选时禁掉文字选中与原生拖拽，让整块画布跟着手指走 */
+.grid.dragging { user-select: none; -webkit-user-select: none; }
+.grid.dragging .g-item { transition: transform .1s ease-out; }
+.grid.dragging .g-item.sel { transform: scale(.96); }

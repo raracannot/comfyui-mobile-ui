@@ -3457,6 +3457,75 @@
         const bar = document.createElement("div");
         bar.className = "gal-bar";
 
+        /* Long-press then drag to mark a run of pictures, the way a photo app
+         * does it. A plain drag has to keep scrolling the grid, so the two are
+         * separated by intent: hold still for 350ms and the gesture becomes a
+         * selection sweep, anchored on whether the first tile was selected. */
+        let dragSel = null;
+        let suppressClick = 0;
+        let barTick = 0;
+
+        function refreshBarSoon() {
+          if (barTick) return;
+          barTick = requestAnimationFrame(() => { barTick = 0; refreshBar(); });
+        }
+
+        function paintCell(cell) {
+          if (!dragSel || !cell || !cell.__item) return;
+          const k = keyOf(cell.__item);
+          if (dragSel.seen.has(k)) return;
+          dragSel.seen.add(k);
+          if (dragSel.mode === "add") chosen.add(k); else chosen.delete(k);
+          cell.classList.toggle("sel", chosen.has(k));
+          refreshBarSoon();
+        }
+
+        grid.addEventListener("pointerdown", (e) => {
+          if (!selecting) return;
+          const cell = e.target.closest ? e.target.closest(".g-item") : null;
+          if (!cell || !cell.__item) return;
+          const k = keyOf(cell.__item);
+          const sx = e.clientX, sy = e.clientY;
+          let armed = false;
+
+          const stopTouch = (ev) => { if (armed && ev.cancelable) ev.preventDefault(); };
+          const move = (ev) => {
+            if (!armed) {
+              if (Math.hypot(ev.clientX - sx, ev.clientY - sy) > 10) finish();
+              return;
+            }
+            if (ev.cancelable) ev.preventDefault();
+            const el = document.elementFromPoint(ev.clientX, ev.clientY);
+            const c = el && el.closest ? el.closest(".g-item") : null;
+            if (c) paintCell(c);
+          };
+          const finish = () => {
+            clearTimeout(timer);
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", finish);
+            window.removeEventListener("pointercancel", finish);
+            document.removeEventListener("touchmove", stopTouch);
+            if (armed) {
+              armed = false;
+              dragSel = null;
+              suppressClick = Date.now() + 400;
+              grid.classList.remove("dragging");
+            }
+          };
+          const timer = setTimeout(() => {
+            armed = true;
+            dragSel = { mode: chosen.has(k) ? "remove" : "add", seen: new Set() };
+            grid.classList.add("dragging");
+            paintCell(cell);
+            try { if (navigator.vibrate) navigator.vibrate(12); } catch (_) {}
+          }, 350);
+
+          window.addEventListener("pointermove", move, { passive: false });
+          window.addEventListener("pointerup", finish);
+          window.addEventListener("pointercancel", finish);
+          document.addEventListener("touchmove", stopTouch, { passive: false });
+        });
+
         const btnAll = document.createElement("button");
         btnAll.className = "btn small";
         btnAll.textContent = "全选";
@@ -3486,7 +3555,6 @@
           bar.appendChild(btnAll);
           const del = document.createElement("button");
           del.className = "btn small danger";
-          del.style.flex = "1 1 0";
           del.textContent = chosen.size ? "删除所选（" + chosen.size + "）" : "删除所选";
           del.disabled = !chosen.size;
           del.onclick = () => removeItems(Array.from(chosen));
@@ -3505,11 +3573,13 @@
               '<span class="g-check">✓</span>';
             cell.onclick = () => {
               if (!selecting) { lightbox(it); return; }
+              if (suppressClick && Date.now() < suppressClick) return;
               const k = keyOf(it);
               if (chosen.has(k)) chosen.delete(k); else chosen.add(k);
               cell.classList.toggle("sel", chosen.has(k));
               refreshBar();
             };
+            cell.__item = it;
             grid.appendChild(cell);
           });
           refreshBar();
