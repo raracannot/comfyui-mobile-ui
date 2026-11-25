@@ -767,7 +767,9 @@
     name.textContent = TOOL_NAMES[tool];
     const hint = document.createElement("span");
     hint.className = "tc-hint";
-    hint.textContent = tool === "marquee" ? "单指拖出选框 · 双指平移" : "划过连线切断 · 点连线切一根";
+    hint.textContent = tool === "marquee"
+      ? "单指拖框选 · 双指平移 · 返回键取消选择"
+      : "划过连线切断 · 返回键撤销";
     const quit = document.createElement("button");
     quit.className = "tc-x";
     quit.textContent = "退出";
@@ -1979,6 +1981,26 @@
     /* At the canvas: the guard entry was just consumed, so ask before the next
      * back press takes the page away. */
     guardArmed = false;
+
+    /* A tool is a session: back means "undo what I just did", then "leave the
+     * tool", and only then the exit prompt. Asking to leave the page while
+     * someone is mid-cut would be the wrong question. */
+    if (tool !== "select") {
+      if (tool === "knife" && undoStack.length) {
+        undoOnce();
+        armBackGuard();
+        return;
+      }
+      if (tool === "marquee" && selSet.size) {
+        selectMany([]);
+        armBackGuard();
+        return;
+      }
+      setTool("select");
+      armBackGuard();
+      return;
+    }
+
     const go = window.confirm("离开手机端界面？\n\n点「确定」退出，点「取消」留在画布。");
     if (go) {
       leaving = true;
