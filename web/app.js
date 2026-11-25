@@ -159,10 +159,32 @@
   let toastTimer = 0;
   function toast(msg, isErr) {
     const el = $("#toast");
+    el.innerHTML = "";
     el.textContent = msg;
     el.className = "toast show" + (isErr ? " err" : "");
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { el.className = "toast"; }, isErr ? 5000 : 2400);
+  }
+
+  /** A toast carrying one button, for actions that need an undo. */
+  function toastAction(msg, label, fn) {
+    const el = $("#toast");
+    el.innerHTML = "";
+    el.className = "toast show act";
+    const span = document.createElement("span");
+    span.textContent = msg;
+    const btn = document.createElement("button");
+    btn.className = "toast-act";
+    btn.textContent = label;
+    btn.onclick = () => {
+      el.className = "toast";
+      el.innerHTML = "";
+      fn();
+    };
+    el.appendChild(span);
+    el.appendChild(btn);
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.className = "toast"; el.innerHTML = ""; }, 5200);
   }
 
   function setSub(text, cls) {
@@ -2924,6 +2946,8 @@
       const body = (b) => {
         let q = "";
         let group = "全部";
+        let items = [];          // rendered from memory; never refetched per keystroke
+        let debounce = 0;
 
         const search = document.createElement("input");
         search.className = "search";
@@ -2942,9 +2966,16 @@
         note.className = "empty";
         b.appendChild(note);
 
-        const draw = async () => {
-          const data = await loadPrompts(true);
-          const items = data.items || [];
+        /* A 2600-character storyboard prompt costs real layout time even when
+         * clamped to three lines, and there are dozens of them. The card shows a
+         * prefix; the full text stays in memory for 插入 / 编辑. */
+        const CLIP = 180;
+        const clip = (s) => {
+          const v = String(s || "");
+          return v.length > CLIP ? v.slice(0, CLIP) + "…" : v;
+        };
+
+        function draw() {
           const groups = ["全部"].concat([...new Set(items.map((x) => x.group || "未分组"))]);
           chips.innerHTML = "";
           groups.forEach((g) => {
@@ -2970,48 +3001,173 @@
             return;
           }
           note.style.display = "none";
+          const frag = document.createDocumentFragment();
+          shown.forEach((it) => frag.appendChild(rowFor(it)));
+          list.appendChild(frag);
+        }
 
-          shown.forEach((it) => {
-            const row = document.createElement("div");
-            row.className = "pg-item";
+        function rowFor(it) {
+          const row = document.createElement("div");
+          row.className = "pg-item";
 
-            const head = document.createElement("div");
-            head.className = "pg-head";
-            const nm = document.createElement("span");
-            nm.className = "pg-name";
-            nm.textContent = it.name || "未命名";
-            const g = document.createElement("span");
-            g.className = "pg-group";
-            g.textContent = it.group || "未分组";
-            head.appendChild(nm);
-            head.appendChild(g);
+          const swipe = document.createElement("div");
+          swipe.className = "pg-swipe";
 
-            const txt = document.createElement("div");
-            txt.className = "pg-text";
-            txt.textContent = it.text;
+          const del = document.createElement("button");
+          del.className = "pg-del";
+          del.textContent = "删除";
+          del.onclick = () => removeItem(it);
 
-            const tools = document.createElement("div");
-            tools.className = "pg-row";
-            const ins = document.createElement("button");
-            ins.className = "btn small";
-            ins.textContent = "插入";
-            ins.onclick = () => insertFragment(it.text);
-            const ed = document.createElement("button");
-            ed.className = "btn small ghost";
-            ed.textContent = "编辑";
-            ed.onclick = () => editFragment(it);
-            tools.appendChild(ins);
-            tools.appendChild(ed);
+          const content = document.createElement("div");
+          content.className = "pg-content";
 
-            row.appendChild(head);
-            row.appendChild(txt);
-            row.appendChild(tools);
-            list.appendChild(row);
+          const head = document.createElement("div");
+          head.className = "pg-head";
+          const nm = document.createElement("span");
+          nm.className = "pg-name";
+          nm.textContent = it.name || "未命名";
+          const g = document.createElement("span");
+          g.className = "pg-group";
+          g.textContent = it.group || "未分组";
+          head.appendChild(nm);
+          head.appendChild(g);
+
+          const txt = document.createElement("div");
+          txt.className = "pg-text";
+          txt.textContent = clip(it.text);
+
+          const tools = document.createElement("div");
+          tools.className = "pg-row";
+          const ins = document.createElement("button");
+          ins.className = "btn small";
+          ins.textContent = "插入";
+          ins.onclick = () => insertFragment(it.text);
+          const ed = document.createElement("button");
+          ed.className = "btn small ghost";
+          ed.textContent = "编辑";
+          ed.onclick = () => editFragment(it);
+          tools.appendChild(ins);
+          tools.appendChild(ed);
+
+          content.appendChild(head);
+          content.appendChild(txt);
+          content.appendChild(tools);
+
+          swipe.appendChild(content);
+          swipe.appendChild(del);
+          row.appendChild(swipe);
+          makeSwipe(content, swipe);
+          return row;
+        }
+
+        const SWIPE_W = 84;
+
+        function closeOpenSwipes(keep) {
+          $$(".pg-swipe.open").forEach((el) => {
+            if (el === keep) return;
+            el.classList.remove("open");
+            const c = el.querySelector(".pg-content");
+            if (c) {
+              c.style.transition = "transform .16s ease-out";
+              c.style.transform = "translateX(0)";
+            }
           });
-        };
+        }
 
-        search.oninput = () => { q = search.value; draw(); };
-        draw();
+        /* Swipe left to reveal 删除. Vertical movement is handed back to the
+         * list so scrolling still feels native. */
+        function makeSwipe(content, swipe) {
+          let x0 = 0, y0 = 0, base = 0, dragging = false, axis = "";
+          const setX = (x) => { content.style.transform = "translateX(" + x + "px)"; };
+
+          content.addEventListener("pointerdown", (e) => {
+            if (e.pointerType === "mouse" && e.button !== 0) return;
+            x0 = e.clientX;
+            y0 = e.clientY;
+            base = swipe.classList.contains("open") ? -SWIPE_W : 0;
+            dragging = true;
+            axis = "";
+            content.style.transition = "none";
+          });
+
+          content.addEventListener("pointermove", (e) => {
+            if (!dragging) return;
+            const dx = e.clientX - x0, dy = e.clientY - y0;
+            if (!axis) {
+              if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+              axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+              if (axis === "y") { dragging = false; return; }
+            }
+            setX(Math.max(-SWIPE_W - 16, Math.min(0, base + dx)));
+          });
+
+          const end = (e) => {
+            if (!dragging) return;
+            dragging = false;
+            const dx = e && e.clientX != null ? e.clientX - x0 : 0;
+            const open = axis === "x" && base + dx < -SWIPE_W / 2;
+            content.style.transition = "transform .16s ease-out";
+            swipe.classList.toggle("open", open);
+            setX(open ? -SWIPE_W : 0);
+            if (open) closeOpenSwipes(swipe);
+          };
+          content.addEventListener("pointerup", end);
+          content.addEventListener("pointercancel", end);
+
+          // while open, a tap on the card closes it instead of running the button
+          content.addEventListener("click", (e) => {
+            if (!swipe.classList.contains("open")) return;
+            e.stopPropagation();
+            e.preventDefault();
+            setTimeout(() => {
+              swipe.classList.remove("open");
+              setX(0);
+            }, 0);
+          }, true);
+        }
+
+        async function removeItem(it) {
+          const data = await loadPrompts();
+          const idx = data.items.findIndex((x) => x.id === it.id);
+          if (idx < 0) return;
+          const removed = data.items.splice(idx, 1)[0];
+          if (!(await persistPrompts(data))) { draw(); return; }
+          items = (S.prompts && S.prompts.items) || items.filter((x) => x.id !== it.id);
+          draw();
+          toastAction("已删除「" + (removed.name || "未命名") + "」", "撤销", () => restoreItem(removed, idx));
+        }
+
+        async function restoreItem(item, idx) {
+          const data = await loadPrompts();
+          data.items.splice(Math.min(idx, data.items.length), 0, item);
+          if (!(await persistPrompts(data))) return;
+          items = (S.prompts && S.prompts.items) || data.items;
+          draw();
+          toast("已恢复「" + (item.name || "未命名") + "」");
+        }
+
+        async function start() {
+          /* One request on a cold open, one paint. With a cache already in
+           * memory, paint it at once and refresh in the background, redrawing
+           * only when the revision actually moved. */
+          const cached = S.prompts;
+          if (cached) {
+            items = cached.items || [];
+            draw();
+          }
+          const fresh = await loadPrompts(true);
+          if (!cached || fresh.rev !== cached.rev) {
+            items = fresh.items || [];
+            draw();
+          }
+        }
+
+        search.oninput = () => {
+          q = search.value;
+          clearTimeout(debounce);
+          debounce = setTimeout(draw, 90);
+        };
+        start();
       };
       return { title: "词库", body, action: "新建", actionFn: () => editFragment(null) };
     },

@@ -634,8 +634,34 @@ input[type="range"]::-webkit-slider-thumb {
 .pg-item {
   border: 1px solid var(--line);
   border-radius: 12px;
+  background: #b3261e;
+  overflow: hidden;
+}
+/* The delete action lives behind the card and is revealed by swiping it left;
+ * the card itself slides, so the red shows through on the right. */
+.pg-swipe { position: relative; }
+.pg-content {
+  position: relative;
+  z-index: 1;               /* must cover the delete button while closed */
   background: var(--surface);
   padding: 11px 12px;
+  touch-action: pan-y;
+  transition: transform .16s ease-out;
+  will-change: transform;
+}
+.pg-del {
+  position: absolute;
+  right: 0; top: 0; bottom: 0;
+  width: 84px;
+  border: 0;
+  background: #b3261e;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 .pg-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
 .pg-name { font-size: 13.5px; font-weight: 650; color: var(--text); }
@@ -833,6 +859,24 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.err { border-color: rgba(248,113,113,.5); color: #ffd4d4; }
+.toast.act {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 10px 16px;
+}
+.toast-act {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line2);
+  background: var(--surface2);
+  color: var(--accent);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+}
 
 /* ---------------------------------------------------------------- landscape */
 @media (orientation: landscape) and (max-height: 520px) {
