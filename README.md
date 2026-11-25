@@ -234,7 +234,7 @@ python _dev/import_prompts.py _dev/seed_prompts.json --dry-run  # 只看会加�
 | GET | `/mobile/api/object_info` | 精简节点表（gzip，约 320KB，含 ETag） |
 | GET | `/mobile/api/bootstrap` | **启动用**：上次工作流 + 它用到的节点规格（约 4KB） |
 | GET | `/mobile/api/meta` | 版本、地址、配置状态 |
-| GET | `/mobile/api/outputs` | 输出文件列表（扫 `output/`，按时间倒序） |
+| GET | `/mobile/api/outputs` | 输出列表（扫 `output/`，按时间倒序，支持 `limit` / `offset` 分页） |
 | GET/POST | `/mobile/api/prompts` | 提示词词库（读 / 整表写，写入带版本号，冲突返回 409） |
 | POST | `/mobile/api/prompts/ops` | **按条目操作**（add / update / delete，只碰指定 id） |
 | GET | `/mobile/api/thumb` | 生成缩略图（`w=320`，WebP，磁盘缓存） |

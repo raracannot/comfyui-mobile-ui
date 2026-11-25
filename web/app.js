@@ -3402,11 +3402,15 @@
 
     gallery() {
       const body = async (b) => {
-        b.innerHTML = '<div class="empty">读取历史…</div>';
-        let listing = { items: [] };
-        try { listing = await (await fetch(rel("api/outputs?limit=300"))).json(); } catch (e) {}
-        const items = (listing.items || []).slice();
-        if (!items.length) {
+        b.innerHTML = '<div class="empty">读取最近 12 项…</div>';
+        /* Only the newest page is requested first: twelve cards fill the
+         * screen, and the panel stops being blank as soon as they land. The
+         * rest arrives behind it and repaints. */
+        let listing = { items: [], total: 0 };
+        try { listing = await (await fetch(rel("api/outputs?limit=12"))).json(); } catch (e) {}
+        let items = (listing.items || []).slice();
+        let total = listing.total || items.length;
+        if (!total) {
           b.innerHTML = '<div class="empty">还没有生成结果。<br>点右上角 ▶ 跑一次。</div>';
           return;
         }
@@ -3437,7 +3441,8 @@
 
         const refreshBar = () => {
           tools.querySelector(".gal-count").textContent =
-            "共 " + items.length + " 项" + (selecting ? " · 已选 " + chosen.size : "");
+            "共 " + total + " 项" + (items.length < total ? " · 已载入 " + items.length : "") +
+            (selecting ? " · 已选 " + chosen.size : "");
           btnSel.textContent = selecting ? "取消选择" : "选择";
           btnAll.textContent = selecting ? "全选" : "";
           btnAll.style.display = selecting ? "" : "none";
@@ -3510,6 +3515,21 @@
         }
 
         draw();
+
+        /* The rest of the history, behind the first page. The server caches
+         * the directory walk, so this second request costs a slice, not a
+         * second scan. */
+        if (total > items.length) {
+          fetch(rel("api/outputs?limit=2000"))
+            .then((r) => r.json())
+            .then((full) => {
+              if (!full || !Array.isArray(full.items) || !full.items.length) return;
+              items = full.items;
+              total = full.total || items.length;
+              draw();
+            })
+            .catch(() => {});
+        }
       };
       return { title: "图库", body, action: "刷新", actionFn: () => openPanel("gallery") };
     },

@@ -773,18 +773,25 @@ MEDIA_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
              ".flac", ".wav", ".mp3", ".ogg")
 
 
-async def list_outputs(request):
-    """Everything in ComfyUI's output folder, newest first.
+_OUTPUTS_CACHE = {"at": 0.0, "items": []}
+OUTPUTS_TTL = 4.0
 
-    /history only knows about runs since the process started, so after any
-    restart the gallery would look empty while the files are all still there.
+
+def _scan_outputs():
+    """Walk the output folder, newest first, cached for a few seconds.
+
+    The walk is what costs; paging through the result afterwards is free, which
+    is what lets the gallery paint the newest dozen while the rest is on its way.
     """
+    now = time.time()
+    if now - _OUTPUTS_CACHE["at"] < OUTPUTS_TTL and _OUTPUTS_CACHE["items"]:
+        return _OUTPUTS_CACHE["items"]
+
     try:
         import folder_paths
         root = folder_paths.get_directory_by_type("output")
-        limit = max(1, min(int(request.query.get("limit", "300")), 2000))
     except Exception:
-        return web.json_response({"items": [], "total": 0})
+        return []
 
     items = []
     if root and os.path.isdir(root):
@@ -807,7 +814,29 @@ async def list_outputs(request):
                 })
 
     items.sort(key=lambda x: -x["mtime"])
-    return web.json_response({"items": items[:limit], "total": len(items)})
+    _OUTPUTS_CACHE["at"] = now
+    _OUTPUTS_CACHE["items"] = items
+    return items
+
+
+async def list_outputs(request):
+    """A page of ComfyUI's output folder, newest first.
+
+    /history only knows about runs since the process started, so after any
+    restart the gallery would look empty while the files are all still there.
+    """
+    try:
+        limit = max(1, min(int(request.query.get("limit", "12")), 2000))
+        offset = max(0, int(request.query.get("offset", "0")))
+    except Exception:
+        limit, offset = 12, 0
+
+    items = _scan_outputs()
+    return _json_ok(request, {
+        "items": items[offset:offset + limit],
+        "total": len(items),
+        "offset": offset,
+    })
 
 
 # --------------------------------------------------------------------------- prompts
