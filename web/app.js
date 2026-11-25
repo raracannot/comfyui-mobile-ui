@@ -2806,15 +2806,37 @@
     ta.remove();
   }
 
-  async function saveFragment(text) {
+  async function saveFragment(text, btn) {
     const t = String(text || "").trim();
     if (!t) { toast("这个字段是空的", true); return; }
-    const data = await loadPrompts(true);
+
+    /* The button is where the finger is, so the button reports progress. A
+     * toast at the bottom of the screen arrives late and far from the tap. */
+    const prevLabel = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "保存中…"; }
+
+    // read from the cache: forcing a GET added a whole round trip before
+    // anything visible happened
+    const data = await loadPrompts();
     const name = t.replace(/\s+/g, " ").slice(0, 18).replace(/\s\S*$/, "") || t.slice(0, 18);
     data.items.unshift({
       id: uid(), name, text: t, group: "未分组", tags: [], created: Date.now(), used: 0,
     });
-    if (await persistPrompts(data)) toast("已存为片段「" + name + "」");
+
+    const ok = await persistPrompts(data);
+    if (ok) {
+      if (btn) {
+        btn.textContent = "✓ 已存入";
+        btn.classList.add("saved");
+        setTimeout(() => {
+          if (btn.isConnected) { btn.disabled = false; btn.textContent = prevLabel; btn.classList.remove("saved"); }
+        }, 1600);
+      }
+      toast("已存为片段「" + name + "」");
+    } else if (btn) {
+      btn.disabled = false;
+      btn.textContent = prevLabel;
+    }
   }
 
   function addPromptTools(box, el, commit) {
@@ -2827,7 +2849,7 @@
     const save = document.createElement("button");
     save.className = "btn small ghost";
     save.textContent = "💾 存为片段";
-    save.onclick = () => saveFragment(el.value);
+    save.onclick = () => saveFragment(el.value, save);
     row.appendChild(ins);
     row.appendChild(save);
     box.appendChild(row);
