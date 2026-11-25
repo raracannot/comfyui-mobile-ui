@@ -402,8 +402,17 @@
 
     const img = imageWidget(n);
     if (img) {
-      parts.push('<img class="thumb" loading="lazy" src="' + esc(api("view?filename=" + encodeURIComponent(img) +
-        "&type=input&preview=jpeg;60")) + '" onerror="this.style.display=\'none\'">');
+      /* Was the full-size /view with preview=jpeg: a 1536² source is a few
+       * hundred KB per node on first paint. The thumb route resizes to 280px,
+       * caches on disk and is served immutable, so a reload costs nothing. */
+      const slash = String(img).lastIndexOf("/");
+      const src = thumbUrl({
+        filename: slash >= 0 ? String(img).slice(slash + 1) : img,
+        subfolder: slash >= 0 ? String(img).slice(0, slash) : "",
+        type: "input",
+      }, 280);
+      parts.push('<img class="thumb" loading="lazy" src="' + esc(src) +
+        '" onerror="this.style.display=\'none\'">');
     }
     if (!widgetRows) {
       // nodes whose values are declared as plain sockets still usually carry

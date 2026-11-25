@@ -146,6 +146,8 @@ Exit codes are meaningful: `0` pass, non-zero fail. Use them as gates.
 | `/view?preview=jpeg` on a video | ComfyUI raises `PIL.UnidentifiedImageError` | only request preview for images |
 | Assuming "input has a default ⇒ it is a widget" | 132 socket inputs on a real install carry defaults; they would be dropped from the prompt | use the explicit type list in `conv.js` |
 | `?v=` not bumped | phone shows the old UI and reports phantom bugs | bump it |
+| Static assets are `immutable` | edited app.js but not `?v=` → the browser keeps the old file even on reload | bump `?v=` (or hard-refresh once) |
+| ComfyUI's cache middleware | sets `Cache-Control: no-store` via `setdefault` on every response | set your own Cache-Control in the handler to override it |
 | Testing with a stale `S.oi` | freshly added files look "missing" | the preflight verifies against `/view` HEAD; the sheet refreshes options after upload |
 
 ---

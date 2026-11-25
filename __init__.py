@@ -21,10 +21,12 @@ Removing this folder restores ComfyUI exactly as it was.
 
 import collections
 import gzip
+import hashlib
 import json
 import logging
 import os
 import time
+import urllib.request
 
 from aiohttp import client as aiohttp_client
 from aiohttp import web
@@ -286,20 +288,79 @@ def _slim_spec(spec):
 def _oi_response(request):
     """Serve the cached slim node index, gzipped when the client accepts it.
 
-    ~2.7 MB raw and a few hundred KB gzipped; the compressed copy is built once
-    alongside the dict so repeat loads cost nothing.
+    ComfyUI's cache middleware only sets Cache-Control via setdefault, so the
+    headers below win. With an ETag the phone revalidates instead of pulling the
+    ~320 KB payload again on every page load.
     """
     enc = (request.headers.get("Accept-Encoding", "") or "").lower()
+    extra = {}
     if "gzip" in enc and _oi_cache.get("gz"):
-        return web.Response(
-            body=_oi_cache["gz"],
-            content_type="application/json",
-            headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
-        )
-    return web.Response(
-        body=json.dumps(_oi_cache["data"], ensure_ascii=False).encode("utf-8"),
-        content_type="application/json",
-    )
+        body = _oi_cache["gz"]
+        extra = {"Content-Encoding": "gzip", "Vary": "Accept-Encoding"}
+    else:
+        body = json.dumps(_oi_cache["data"], ensure_ascii=False).encode("utf-8")
+
+    etag = '"%s"' % hashlib.sha1(body).hexdigest()[:20]
+    headers = dict(extra)
+    headers["ETag"] = etag
+    headers["Cache-Control"] = "private, max-age=300"
+    if request.headers.get("If-None-Match") == etag:
+        return web.Response(status=304, headers=headers)
+    return web.Response(body=body, content_type="application/json", headers=headers)
+
+
+def _prewarm_oi():
+    """Build the slim node table in the background right after startup.
+
+    It costs ~2.5 s (the raw /object_info is 4.7 MB and has to be parsed and
+    trimmed), and paying it on the first phone request makes the page feel
+    broken. Doing it while nobody is looking is free.
+    """
+    LOG.info("mobile_ui: prewarm scheduled")
+
+    def worker():
+        # PromptServer.instance.port is only meaningful once the server object
+        # exists, so read it here rather than at schedule time.
+        port = None
+        for attempt in range(40):
+            try:
+                from server import PromptServer
+                port = getattr(PromptServer.instance, "port", None)
+            except Exception:
+                port = None
+            if port:
+                break
+            time.sleep(0.5)
+        if not port:
+            LOG.warning("mobile_ui: prewarm could not find the server port")
+            return
+
+        for attempt in range(30):
+            time.sleep(2)
+            try:
+                with urllib.request.urlopen(
+                        "http://127.0.0.1:%d/object_info" % port, timeout=120) as r:
+                    raw = json.loads(r.read().decode("utf-8"))
+            except Exception as exc:
+                if attempt % 5 == 0:
+                    LOG.info("mobile_ui: prewarm attempt %d: %s", attempt + 1, exc)
+                continue
+            if not isinstance(raw, dict) or len(raw) < 50:
+                continue
+            slim = {c: _slim_node(i) for c, i in raw.items() if isinstance(i, dict)}
+            if not slim:
+                continue
+            _oi_cache["data"] = slim
+            _oi_cache["gz"] = gzip.compress(
+                json.dumps(slim, ensure_ascii=False).encode("utf-8"), 6)
+            _oi_cache["at"] = time.time()
+            LOG.info("mobile_ui: node table prewarmed (%d types, %.0f KB gz)",
+                     len(slim), len(_oi_cache["gz"]) / 1024)
+            return
+        LOG.warning("mobile_ui: prewarm gave up; the table will be built on first request")
+
+    import threading
+    threading.Thread(target=worker, name="mobile_ui_prewarm", daemon=True).start()
 
 
 def _slim_node(info):
@@ -889,8 +950,41 @@ def _register():
     routes.post("/mobile/api/debug/cmd")(debug_push)
     routes.get("/mobile/api/debug/poll")(debug_poll)
 
-    if os.path.isdir(ASSET_DIR):
-        routes.static("/mobile/a", ASSET_DIR, name="mobile_ui_assets")
+    # Assets are versioned by ?v= in index.html, so they can be cached forever.
+    # routes.static would leave them to ComfyUI's default no-store, which means
+    # re-downloading 160 KB of JS/CSS on every single page load.
+    asset_types = {
+        ".js": "application/javascript", ".css": "text/css", ".html": "text/html",
+        ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
+        ".json": "application/json", ".woff2": "font/woff2",
+    }
+
+    async def asset(request):
+        try:
+            path = _confine(ASSET_DIR, request.match_info.get("name", ""))
+        except ValueError:
+            return web.Response(status=400)
+        if not os.path.isfile(path):
+            return web.Response(status=404)
+        ext = os.path.splitext(path)[1].lower()
+        with open(path, "rb") as f:
+            body = f.read()
+        headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+        enc = (request.headers.get("Accept-Encoding", "") or "").lower()
+        if "gzip" in enc and len(body) > 1024 and ext in (".js", ".css", ".html", ".svg", ".json"):
+            body = gzip.compress(body, 6)
+            headers["Content-Encoding"] = "gzip"
+            headers["Vary"] = "Accept-Encoding"
+        return web.Response(body=body,
+                            content_type=asset_types.get(ext, "application/octet-stream"),
+                            headers=headers)
+
+    routes.get("/mobile/a/{name}")(asset)
+
+    try:
+        _prewarm_oi()
+    except Exception as exc:
+        LOG.debug("mobile_ui: prewarm not started: %s", exc)
 
     LOG.info("mobile_ui %s ready at /mobile/  (workflows: %s)", __version__, WORKFLOW_DIR)
 
