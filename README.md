@@ -231,7 +231,8 @@ python _dev/import_prompts.py _dev/seed_prompts.json --dry-run  # 只看会加�
 | GET | `/mobile/` | 界面 |
 | GET | `/mobile/api/workflows` | 工作流列表 |
 | GET/POST | `/mobile/api/workflow` | 读取 / 另存工作流 |
-| GET | `/mobile/api/object_info` | 精简节点表（gzip，约 240KB，含 30 分钟缓存） |
+| GET | `/mobile/api/object_info` | 精简节点表（gzip，约 320KB，含 ETag） |
+| GET | `/mobile/api/bootstrap` | **启动用**：上次工作流 + 它用到的节点规格（约 4KB） |
 | GET | `/mobile/api/meta` | 版本、地址、配置状态 |
 | GET | `/mobile/api/outputs` | 输出文件列表（扫 `output/`，按时间倒序） |
 | GET/POST | `/mobile/api/prompts` | 提示词词库（读 / 整表写，写入带版本号，冲突返回 409） |
@@ -315,6 +316,8 @@ node _dev/test_convert.js _dev/object_info.json <ui.json> <api.json> ...
 ---
 
 ## 十三、加载速度
+
+**分两阶段加载**：启动只要 `/mobile/api/bootstrap`（上次工作流 + 它用到的十几个节点类型，约 **4 KB**），画布立刻出来；全量节点表（320 KB）在后台补齐，补齐后更新状态栏并重画。节点类型清单由服务端记录在 `history.json`（每个工作流用过哪些类型），所以换一台手机也能享受。
 
 首次打开约 **0.6 秒 / 380 KB**，之后每次约 **0.6 秒 / 7 KB**（实测数据，手机端会慢一些）。
 

@@ -227,6 +227,42 @@
      * of the stack and every overlay is pushed above it. */
     armBackGuard();
     updateTitle();
+    connectWS();
+
+    /* Phase 1: what the canvas needs now. /bootstrap returns the last workflow
+     * together with the specs for just the node types it uses - a few KB
+     * instead of the 320 KB table - so the graph paints immediately. */
+    const last = localStorage.getItem("mui.last") || "";
+    let painted = false;
+    {
+      try {
+        /* No local memory is not a reason to skip this: the server keeps the
+         * history, so a brand-new device starts from whatever was opened last. */
+        const q = last ? "?path=" + encodeURIComponent(last) : "";
+        const r = await fetch(rel("api/bootstrap" + q));
+        const j = await r.json();
+        if (!j.error && j.workflow) {
+          S.oi = j.oi || {};
+          S.oiError = "";
+          loadDoc(j.workflow, j.path || last);
+          const have = Object.keys(S.oi).length;
+          setSub(S.doc.nodes.length + " 个节点 · " + have + "/" + (j.total || "?") + " 种节点");
+          painted = true;
+        }
+      } catch (_) { /* fall through to the one-shot load below */ }
+    }
+
+    /* Phase 2: the whole table, in the background. Until it lands the node
+     * picker simply lists fewer types; the graph itself is fully usable. */
+    if (painted) {
+      loadObjectInfo(4).then((ok) => {
+        if (!ok) return;
+        setSub(Object.keys(S.oi).length + " 种节点已就绪");
+        render();
+      });
+      return;
+    }
+
     const ok = await loadObjectInfo(4);
     if (ok) {
       setSub(Object.keys(S.oi).length + " 种节点已就绪");
@@ -246,12 +282,6 @@
       toast("节点表没加载出来，参数会显示不全。点顶部副标题重试。", true);
     }
 
-    connectWS();
-
-    const last = localStorage.getItem("mui.last");
-    if (last) {
-      await openWorkflow(last, true).catch(() => {});
-    }
     if (!S.doc) {
       const list = await listWorkflows();
       const pick = pickDefaultWorkflow(list);
@@ -2147,7 +2177,20 @@
   }
 
   function hasTable() {
-    return S.oi && Object.keys(S.oi).length >= 50;
+    if (!S.oi) return false;
+    const n = Object.keys(S.oi).length;
+    if (n >= 50) return true;
+    /* A bootstrap-sized table is perfectly usable: what matters is that every
+     * type in this graph has a spec, not that unrelated types do. */
+    if (!S.doc) return false;
+    /* MarkdownNote / Note are drawn by the frontend and have no backend class,
+     * so they are absent from object_info even in a complete table. */
+    const FRONTEND_ONLY = { MarkdownNote: 1, Note: 1 };
+    for (const node of S.nodes.values()) {
+      if (FRONTEND_ONLY[node.type]) continue;
+      if (!S.oi[node.type]) return false;
+    }
+    return n > 0;
   }
 
   /* Only file-backed combo lists are worth validating. A COMFY_DYNAMICCOMBO or a

@@ -167,7 +167,7 @@ async def list_workflows(request):
                     "mtime": int(st.st_mtime),
                 })
     items.sort(key=lambda x: (-x["mtime"], x["path"]))
-    return web.json_response({"workflows": items})
+    return _json_ok(request, {"workflows": items})
 
 
 async def get_workflow(request):
@@ -185,9 +185,67 @@ async def get_workflow(request):
             data = json.load(f)
     except Exception as exc:
         return web.json_response({"error": f"解析失败: {exc}"}, status=400)
-    return web.json_response({
-        "path": os.path.relpath(full, WORKFLOW_DIR).replace("\\", "/"),
-        "workflow": data,
+    rel_path = os.path.relpath(full, WORKFLOW_DIR).replace("\\", "/")
+    try:
+        _note_workflow(rel_path, data)
+    except Exception:
+        pass
+    return _json_ok(request, {"path": rel_path, "workflow": data})
+
+
+async def get_bootstrap(request):
+    """Everything the canvas needs to paint, in one small response.
+
+    The full node table is 320 KB gzipped (2655 types); a workflow uses a few
+    dozen of them. Sending the last workflow together with just the specs it
+    needs makes the first paint a fraction of that, and the full table follows
+    in the background for the node picker.
+    """
+    bad = _guard(request)
+    if bad is not None:
+        return bad
+
+    hist = _read_history()
+    want = request.query.get("path") or hist.get("last") or ""
+    doc, rel_path = None, ""
+    if want:
+        try:
+            full = _confine(WORKFLOW_DIR, want)
+            if os.path.isfile(full):
+                with open(full, "r", encoding="utf-8") as f:
+                    doc = json.load(f)
+                rel_path = os.path.relpath(full, WORKFLOW_DIR).replace("\\", "/")
+        except Exception:
+            doc = None
+
+    if not doc or not isinstance(doc.get("nodes"), list):
+        return web.json_response({"error": "没有可用的工作流", "path": ""}, status=404)
+
+    types = sorted({str(n.get("type")) for n in doc["nodes"] if n.get("type")})
+    table = _oi_cache.get("data") or {}
+    if not table:
+        # the prewarm thread has not finished; let the client take the slow path
+        return web.json_response({"error": "节点表尚未就绪", "path": rel_path}, status=503)
+
+    oi = {t: table[t] for t in types if t in table}
+    missing = [t for t in types if t not in table]
+
+    try:
+        _note_workflow(rel_path, doc)
+    except Exception:
+        pass
+    hist = _read_history()
+    recent = sorted(hist["workflows"].items(), key=lambda kv: kv[1].get("openedAt", 0), reverse=True)[:20]
+
+    return _json_ok(request, {
+        "path": rel_path,
+        "workflow": doc,
+        "types": types,
+        "oi": oi,
+        "missing": missing,
+        "total": len(table),
+        "recent": [{"path": p, "openedAt": v.get("openedAt", 0), "count": v.get("count", 0)}
+                   for p, v in recent],
     })
 
 
@@ -758,6 +816,73 @@ async def list_outputs(request):
 # it survives plugin updates and can be edited by hand.
 
 PROMPT_DIR = os.path.join(_user_dir(), "default", "mobile_ui")
+
+# History of what the phone actually opened. Keeping it server side means a
+# second device benefits from the first one, and it is what lets /bootstrap
+# send only the node specs a workflow needs instead of all 2655.
+HISTORY_FILE = os.path.join(PROMPT_DIR, "history.json")
+HISTORY_MAX = 300
+
+
+def _read_history():
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict) and isinstance(d.get("workflows"), dict):
+            return d
+    except Exception:
+        pass
+    return {"workflows": {}, "last": None}
+
+
+def _write_history(d):
+    try:
+        os.makedirs(PROMPT_DIR, exist_ok=True)
+        tmp = HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, HISTORY_FILE)
+    except Exception as exc:
+        LOG.warning("mobile_ui: cannot write history: %s", exc)
+
+
+def _note_workflow(path, doc):
+    """Remember that this workflow was opened, and which node types it needs."""
+    types = sorted({str(n.get("type")) for n in (doc.get("nodes") or []) if n.get("type")})
+    h = _read_history()
+    h["workflows"][path] = {
+        "openedAt": int(time.time()),
+        "count": len(doc.get("nodes") or []),
+        "types": types,
+    }
+    h["last"] = path
+    if len(h["workflows"]) > HISTORY_MAX:
+        drop = sorted(h["workflows"].items(), key=lambda kv: kv[1].get("openedAt", 0))
+        for k, _ in drop[: len(h["workflows"]) - HISTORY_MAX]:
+            h["workflows"].pop(k, None)
+    _write_history(h)
+
+
+def _json_ok(request, obj, max_age=0):
+    """json_response with gzip and unescaped UTF-8.
+
+    The cache middleware only sets Cache-Control via setdefault, so headers
+    set here win. Chinese text now stays UTF-8 instead of escaped code points,
+    which alone was doubling the prompt library on the wire.
+    """
+    raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    headers = {}
+    enc = (request.headers.get("Accept-Encoding", "") or "").lower()
+    if "gzip" in enc and len(raw) > 1024:
+        raw = gzip.compress(raw, 6)
+        headers["Content-Encoding"] = "gzip"
+        headers["Vary"] = "Accept-Encoding"
+    if max_age:
+        headers["Cache-Control"] = "private, max-age=%d" % max_age
+    return web.Response(body=raw, content_type="application/json", headers=headers)
+
 PROMPT_FILE = os.path.join(PROMPT_DIR, "prompts.json")
 
 
@@ -811,7 +936,7 @@ def _clean_item(it):
 
 async def get_prompts(request):
     data = _read_prompts()
-    return web.json_response({
+    return _json_ok(request, {
         "rev": data.get("rev", 0),
         "items": data.get("items", []),
         "file": PROMPT_FILE,
@@ -924,7 +1049,7 @@ async def prompt_ops(request):
         LOG.error("mobile_ui: cannot write prompts: %s", exc)
         return web.json_response({"error": "写入失败: %s" % exc}, status=500)
 
-    return web.json_response({
+    return _json_ok(request, {
         "rev": data["rev"],
         "items": items,
         "applied": applied,
@@ -1050,6 +1175,7 @@ def _register():
 
     routes.get("/mobile/api/workflows")(list_workflows)
     routes.get("/mobile/api/workflow")(get_workflow)
+    routes.get("/mobile/api/bootstrap")(get_bootstrap)
     routes.post("/mobile/api/workflow")(save_workflow)
     routes.get("/mobile/api/object_info")(object_info)
     routes.get("/mobile/api/meta")(meta)
