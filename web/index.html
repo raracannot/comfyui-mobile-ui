@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-title" content="ComfyUI">
 <meta name="format-detection" content="telephone=no">
 <title>ComfyUI 手机版</title>
-<link rel="stylesheet" href="a/app.css?v=18">
+<link rel="stylesheet" href="a/app.css?v=22">
 <!--MUI_BOOT-->
 </head>
 <body>
@@ -42,9 +42,9 @@
   </main>
 
   <nav id="dock">
-    <button data-act="fit" class="dock-btn">
-      <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
-      <span>适应</span>
+    <button data-act="layout" class="dock-btn">
+      <svg viewBox="0 0 24 24"><path d="M4 5h6v6H4zM14 5h6v6h-6zM4 15h6v4H4zM14 15h6v4h-6z"/></svg>
+      <span>布局</span>
     </button>
     <button data-act="add" class="dock-btn">
       <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
@@ -54,13 +54,9 @@
       <svg viewBox="0 0 24 24"><path d="M4 6h4v4H4zM12 7h8M4 14h4v4H4zM12 15h8"/></svg>
       <span>节点</span>
     </button>
-    <button data-act="prompts" class="dock-btn">
-      <svg viewBox="0 0 24 24"><path d="M6 4h9l4 4v12H6zM9 9h6M9 13h6M9 17h4"/></svg>
-      <span>词库</span>
-    </button>
-    <button data-act="gallery" class="dock-btn">
-      <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM4 15l4-4 4 4 3-3 5 5"/></svg>
-      <span>图库</span>
+    <button data-act="assets" class="dock-btn">
+      <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h3l2 2h9a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+      <span>资产</span>
     </button>
   </nav>
 </div>
@@ -94,7 +90,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="a/conv.js?v=18"></script>
-<script src="a/app.js?v=18"></script>
+<script src="a/conv.js?v=22"></script>
+<script src="a/app.js?v=22"></script>
 </body>
 </html>

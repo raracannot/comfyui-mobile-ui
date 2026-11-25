@@ -250,10 +250,12 @@
       if (!b) return;
       const act = b.dataset.act;
       if (act === "fit") fitAll();
+      else if (act === "layout") openLayoutMenu();
       else if (act === "add") openPanel("nodes");
       else if (act === "nodelist") openPanel("nodelist");
       else if (act === "gallery") openPanel("gallery");
       else if (act === "prompts") openPanel("prompts");
+      else if (act === "assets") openAssetMenu();
     });
     const vp = $("#viewport");
     vp.addEventListener("pointerdown", onDown);
@@ -1454,7 +1456,15 @@
 
   function pushOverlay(kind, closer) {
     overlayStack.push({ kind, closer });
-    try { history.pushState({ muiOverlay: overlayStack.length }, ""); } catch (_) {}
+    try {
+      if (reuseNextHistory) {
+        // take over the entry the just-closed menu pushed, instead of adding one
+        reuseNextHistory = false;
+        history.replaceState({ muiOverlay: overlayStack.length }, "");
+      } else {
+        history.pushState({ muiOverlay: overlayStack.length }, "");
+      }
+    } catch (_) {}
   }
 
   /** Close an overlay by kind. `consumeHistory` is false when the close came
@@ -1995,6 +2005,207 @@
   function rawClosePanel() {
     $("#panel").classList.remove("open");
     $("#panel").setAttribute("aria-hidden", "true");
+  }
+
+  /* ================================================================ dock menus */
+  /* Popovers above the dock (布局 / 资产). They take a history entry like any
+   * other overlay, so back closes the menu rather than leaving the page. */
+
+  let dockMenuEl = null;
+  let reuseNextHistory = false;
+
+  function closeDockMenu() {
+    if (!dockMenuEl) return;
+    if (dockMenuEl.__off) document.removeEventListener("pointerdown", dockMenuEl.__off, true);
+    dockMenuEl.remove();
+    dockMenuEl = null;
+  }
+
+  function dismissDockMenu() {
+    if (!popOverlay("dockmenu")) closeDockMenu();
+  }
+
+  function openDockMenu(anchorAct, items) {
+    if (dockMenuEl) { dismissDockMenu(); return; }
+
+    const btn = document.querySelector('[data-act="' + anchorAct + '"]');
+    if (!btn) return;
+
+    const menu = document.createElement("div");
+    menu.className = "dock-menu";
+    items.forEach((item) => {
+      const row = document.createElement("button");
+      row.className = "dock-menu-item" + (item.disabled ? " off" : "");
+      const txt = document.createElement("span");
+      txt.className = "dm-txt";
+      const t = document.createElement("span");
+      t.className = "dm-t";
+      t.textContent = item.label;
+      const s = document.createElement("span");
+      s.className = "dm-s";
+      s.textContent = item.sub || "";
+      txt.appendChild(t);
+      if (item.sub) txt.appendChild(s);
+      row.appendChild(txt);
+      row.onclick = () => {
+        if (item.disabled) { dismissDockMenu(); return; }
+        if (item.reuseHistory) {
+          /* Hand the menu's history entry to the panel we are about to open.
+           * Using back()+push() here races: pushState can run before the
+           * asynchronous back() lands, which silently eats the guard entry and
+           * eventually lets a back press leave the page. */
+          const i = overlayStack.findIndex((e) => e.kind === "dockmenu");
+          if (i >= 0) overlayStack.splice(i, 1);
+          closeDockMenu();
+          reuseNextHistory = true;
+        } else {
+          dismissDockMenu();
+        }
+        item.run();
+      };
+      menu.appendChild(row);
+    });
+
+    document.body.appendChild(menu);
+
+    // right-aligned to the button, but clamped: the leftmost dock button would
+    // otherwise push a 208px menu off the left edge
+    const r = btn.getBoundingClientRect();
+    const mw = menu.offsetWidth || 208;
+    const right = Math.max(8, Math.min(window.innerWidth - r.right,
+      window.innerWidth - mw - 8));
+    menu.style.right = right + "px";
+    menu.style.bottom = Math.max(8, window.innerHeight - r.top + 10) + "px";
+
+    dockMenuEl = menu;
+    pushOverlay("dockmenu", closeDockMenu);
+
+    const off = (e) => {
+      if (menu.contains(e.target) || btn.contains(e.target)) return;
+      dismissDockMenu();
+    };
+    menu.__off = off;
+    setTimeout(() => document.addEventListener("pointerdown", off, true), 0);
+  }
+
+  function openPanelReused(kind) {
+    reuseNextHistory = true;
+    openPanel(kind);
+  }
+
+  function openAssetMenu() {
+    openDockMenu("assets", [
+      { label: "图库", sub: "看图 · 存图 · 批量删除", run: () => openPanelReused("gallery"), reuseHistory: true },
+      { label: "词库", sub: "提示词片段 · 光标处插入", run: () => openPanelReused("prompts"), reuseHistory: true },
+    ]);
+  }
+
+  function openLayoutMenu() {
+    openDockMenu("layout", [
+      { label: "适应", sub: "缩放到看得见全图", run: fitAll },
+      { label: "重排", sub: "按连线关系自动分层排列", run: arrangeCanvas },
+      { label: "撤销重排", sub: "回到重排之前的位置", run: undoArrange, disabled: !lastLayout },
+    ]);
+  }
+
+  /* ---------------------------------------------------------------- auto layout */
+  /* Columns by dependency depth, rows ordered by the average height of each
+   * node's parents, so links run mostly left to right instead of crossing. */
+
+  let lastLayout = null;
+
+  function arrangeCanvas() {
+    const nodes = [...S.nodes.values()];
+    if (nodes.length < 2) { toast("节点太少，不用重排"); return; }
+
+    const ids = new Set(nodes.map((n) => n.id));
+    const parents = new Map(nodes.map((n) => [n.id, []]));
+    S.links.forEach((l) => {
+      if (l.origin === l.target) return;
+      if (ids.has(l.origin) && ids.has(l.target)) parents.get(l.target).push(l.origin);
+    });
+
+    const depth = new Map();
+    const seen = new Map();
+    const walk = (id) => {
+      if (seen.get(id) === 2) return depth.get(id);
+      if (seen.get(id) === 1) return 0;             // cycle: treat as a root
+      seen.set(id, 1);
+      let best = 0;
+      for (const p of parents.get(id) || []) best = Math.max(best, walk(p) + 1);
+      seen.set(id, 2);
+      depth.set(id, best);
+      return best;
+    };
+    nodes.forEach((n) => walk(n.id));
+
+    const cols = new Map();
+    nodes.forEach((n) => {
+      const k = depth.get(n.id) || 0;
+      if (!cols.has(k)) cols.set(k, []);
+      cols.get(k).push(n);
+    });
+
+    // offsetHeight is pre-transform, so it is already in world units
+    const heightOf = (n) => {
+      const el = document.querySelector('.node[data-id="' + n.id + '"]');
+      return (el && el.offsetHeight) || 90;
+    };
+    const midParentY = (n) => {
+      const ps = parents.get(n.id) || [];
+      if (!ps.length) return n.pos[1];
+      let sum = 0;
+      let k = 0;
+      ps.forEach((p) => { const m = S.nodes.get(p); if (m) { sum += m.pos[1]; k++; } });
+      return k ? sum / k : n.pos[1];
+    };
+
+    const GAP_X = 70;
+    const GAP_Y = 26;
+    const keys = [...cols.keys()].sort((a, b) => a - b);
+    keys.forEach((k) => cols.set(k, cols.get(k).slice()
+      .sort((a, b) => (midParentY(a) - midParentY(b)) || (a.pos[1] - b.pos[1]))));
+
+    const colW = new Map();
+    const colH = new Map();
+    keys.forEach((k) => {
+      const list = cols.get(k);
+      colW.set(k, Math.max(...list.map(nodeWidth)));
+      colH.set(k, list.reduce((s, n) => s + heightOf(n) + GAP_Y, -GAP_Y));
+    });
+    const tallest = Math.max(...keys.map((k) => colH.get(k)));
+
+    lastLayout = nodes.map((n) => ({ id: n.id, pos: [n.pos[0], n.pos[1]] }));
+
+    let x = 0;
+    keys.forEach((k) => {
+      let y = (tallest - colH.get(k)) / 2;
+      cols.get(k).forEach((n) => {
+        n.pos = [Math.round(x), Math.round(y)];
+        y += heightOf(n) + GAP_Y;
+      });
+      x += colW.get(k) + GAP_X;
+    });
+
+    S.dirty = true;
+    render();
+    layoutLinks();
+    fitAll();
+    toast("已重排 " + nodes.length + " 个节点（可撤销）");
+  }
+
+  function undoArrange() {
+    if (!lastLayout) { toast("没有可撤销的重排", true); return; }
+    lastLayout.forEach(({ id, pos }) => {
+      const n = S.nodes.get(id);
+      if (n) n.pos = [pos[0], pos[1]];
+    });
+    lastLayout = null;
+    S.dirty = true;
+    render();
+    layoutLinks();
+    fitAll();
+    toast("已还原重排前的位置");
   }
 
   /* ============================================================ prompt library */

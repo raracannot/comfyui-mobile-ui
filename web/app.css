@@ -572,6 +572,46 @@ input[type="range"]::-webkit-slider-thumb {
 .q-item .t { font-size: 13px; font-weight: 600; }
 .q-item .m { font-size: 11px; color: var(--dim2); margin: 4px 0 10px; }
 
+/* ---------------------------------------------------------------- asset menu */
+.dock-menu {
+  position: fixed;
+  z-index: 58;
+  min-width: 208px;
+  padding: 6px;
+  border-radius: 15px;
+  background: #171c25f2;
+  border: 1px solid var(--line2);
+  box-shadow: 0 14px 38px #000c, 0 0 0 1px #00000040;
+  backdrop-filter: blur(12px);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: dm-in .13s ease-out;
+}
+@keyframes dm-in {
+  from { opacity: 0; transform: translateY(7px) scale(.98); }
+  to   { opacity: 1; transform: none; }
+}
+.dock-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 13px;
+  border: 0;
+  border-radius: 11px;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  -webkit-tap-highlight-color: transparent;
+}
+.dock-menu-item:active { background: #ffffff14; }
+.dock-menu-item.off { opacity: .4; }
+.dm-txt { display: flex; flex-direction: column; gap: 2px; }
+.dm-t { font-size: 14px; font-weight: 620; }
+.dm-s { font-size: 11px; color: var(--dim2); }
+
 /* ---------------------------------------------------------------- prompt library */
 .pg-tools { display: flex; gap: 8px; margin-top: 8px; }
 .pg-tools .btn { flex: 1 1 0; width: auto; padding: 9px 6px; font-size: 12px; }
