@@ -309,6 +309,7 @@
     S.links.forEach((l) => { maxLink = Math.max(maxLink, l.id); });
     S.nextLinkId = Math.max(maxLink, doc.last_link_id || 0) + 1;
     S.sel = null;
+    hidePeek();
     S.dirty = false;
     S.wfPath = path || "";
     S.wfName = String(path || "").replace(/\.json$/i, "").split("/").pop();
@@ -684,6 +685,128 @@
     selectNode(id);
   }
 
+  /* =================================================================== tools */
+  /* One canvas, three tools. 选择 is the default and behaves exactly as before;
+   * the other two take over single-finger drags, while two fingers keep
+   * panning and zooming so the canvas never becomes unusable. */
+
+  let tool = "select";
+  let selSet = new Set();
+  const TOOL_NAMES = { select: "选择", marquee: "框选", knife: "切刀" };
+
+  /* ---- undo -----------------------------------------------------------------
+   * The knife is destructive, so at least the structural edits have to be
+   * reversible. Snapshots are shallow copies of the link records plus the node
+   * objects themselves: serializeDoc() rebuilds S.doc from these at save time,
+   * so holding the originals is enough. */
+  const undoStack = [];
+  const UNDO_MAX = 20;
+
+  function pushUndo(label, entry) {
+    undoStack.push(Object.assign({ label }, entry));
+    while (undoStack.length > UNDO_MAX) undoStack.shift();
+  }
+
+  function snapLinks() {
+    return Array.from(S.links.values()).map((l) => Object.assign({}, l));
+  }
+
+  function applyLinks(list) {
+    S.links.clear();
+    for (const l of list) S.links.set(l.id, Object.assign({}, l));
+    let max = 0;
+    S.links.forEach((l) => { max = Math.max(max, l.id); });
+    S.nextLinkId = Math.max(S.nextLinkId, max + 1);
+    S.dirty = true;
+    render();
+    updateTitle();
+  }
+
+  /** Record the state *before* deleting nodes, so the originals can come back. */
+  function recordNodeDelete(ids) {
+    const nodes = [];
+    for (const id of ids) {
+      const n = S.nodes.get(id);
+      if (n) nodes.push(n);
+    }
+    if (!nodes.length) return;
+    pushUndo("删除 " + nodes.length + " 个节点", { kind: "nodes", nodes, links: snapLinks() });
+  }
+
+  function undoOnce() {
+    const e = undoStack.pop();
+    if (!e) { toast("没有可撤销的操作", true); return; }
+    if (e.kind === "nodes") {
+      for (const n of e.nodes) S.nodes.set(n.id, n);
+      applyLinks(e.links);
+    } else {
+      applyLinks(e.links);
+    }
+    toast("已撤销：" + e.label);
+  }
+
+  /* ---- tool switching ------------------------------------------------------- */
+  function setTool(t) {
+    tool = TOOL_NAMES[t] ? t : "select";
+    const chip = document.getElementById("toolChip");
+    if (chip) chip.remove();
+    hideCutTrace();
+    hideMarquee();
+    if (tool === "select") {
+      document.body.removeAttribute("data-tool");
+      return;
+    }
+    document.body.setAttribute("data-tool", tool);
+
+    const el = document.createElement("div");
+    el.id = "toolChip";
+    el.className = "tool-chip";
+    const dot = document.createElement("i");
+    dot.className = "tc-dot";
+    const name = document.createElement("b");
+    name.textContent = TOOL_NAMES[tool];
+    const hint = document.createElement("span");
+    hint.className = "tc-hint";
+    hint.textContent = tool === "marquee" ? "单指拖出选框 · 双指平移" : "划过连线切断 · 点连线切一根";
+    const quit = document.createElement("button");
+    quit.className = "tc-x";
+    quit.textContent = "退出";
+    quit.onclick = () => setTool("select");
+    el.appendChild(dot);
+    el.appendChild(name);
+    el.appendChild(hint);
+    el.appendChild(quit);
+    $("#viewport").appendChild(el);
+    toast("已切换到" + TOOL_NAMES[tool] + "工具，双击空白处可退出");
+  }
+
+  /* ---- cut trace + marquee overlays ---------------------------------------- */
+  let cutEl = null;
+  function showCutTrace() {
+    if (!cutEl) {
+      cutEl = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+      cutEl.setAttribute("class", "cut-trace");
+      const layer = $("#cutLayer");
+      if (layer) layer.appendChild(cutEl);
+    }
+    cutEl.setAttribute("points", "");
+  }
+  function hideCutTrace() {
+    if (cutEl) { cutEl.remove(); cutEl = null; }
+  }
+
+  let marqueeEl = null;
+  function showMarquee() {
+    if (!marqueeEl) {
+      marqueeEl = document.createElement("div");
+      marqueeEl.className = "marquee";
+      $("#viewport").appendChild(marqueeEl);
+    }
+  }
+  function hideMarquee() {
+    if (marqueeEl) { marqueeEl.remove(); marqueeEl = null; }
+  }
+
   function onDown(e) {
     const r = vpRect();
     ptr.set(e.pointerId, { x: e.clientX - r.left, y: e.clientY - r.top });
@@ -695,8 +818,23 @@
     if (ptr.size > 2) return;
 
     const t = e.target;
+    const lx = e.clientX - r.left, ly = e.clientY - r.top;
+    const nodeEl0 = t.closest ? t.closest(".node") : null;
+
+    if (tool === "knife") {
+      g = { type: "knife", pts: [[lx, ly]] };
+      showCutTrace();
+      return;
+    }
+    if (tool === "marquee" && !nodeEl0) {
+      g = { type: "marquee", x0: lx, y0: ly, x1: lx, y1: ly };
+      showMarquee();
+      updateMarquee(lx, ly);
+      return;
+    }
+
     const portEl = t.closest ? t.closest(".p") : null;
-    if (portEl) {
+    if (portEl && tool === "select") {
       const nodeEl = portEl.closest(".node");
       g = {
         type: "link",
@@ -711,7 +849,15 @@
     if (nodeEl) {
       const id = +nodeEl.dataset.id;
       const n = S.nodes.get(id);
-      g = { type: "node", id, px: n.pos[0], py: n.pos[1] };
+      if (!selSet.has(id)) selectNode(id);
+      // dragging any selected node moves the whole group
+      const group = selSet.size > 1
+        ? Array.from(selSet).map((i) => {
+            const m = S.nodes.get(i);
+            return m ? { id: i, x: m.pos[0], y: m.pos[1] } : null;
+          }).filter(Boolean)
+        : null;
+      g = { type: "node", id, px: n.pos[0], py: n.pos[1], ox: lx, oy: ly, group };
       return;
     }
     g = { type: "pan" };
@@ -761,12 +907,40 @@
     }
     if (g.type === "node") {
       const n = S.nodes.get(g.id);
+      if (g.group && g.group.length > 1) {
+        const dxw = (lx - g.ox) / S.view.z;
+        const dyw = (ly - g.oy) / S.view.z;
+        for (const it of g.group) {
+          const m = S.nodes.get(it.id);
+          if (!m) continue;
+          m.pos[0] = it.x + dxw;
+          m.pos[1] = it.y + dyw;
+          if (m.__el) {
+            m.__el.style.left = m.pos[0] + "px";
+            m.__el.style.top = m.pos[1] + "px";
+          }
+          updateNodeLinks(m.id);
+        }
+        placePeek(n);
+        S.dirty = true;
+        return;
+      }
       n.pos[0] += dx / S.view.z;
       n.pos[1] += dy / S.view.z;
       n.__el.style.left = n.pos[0] + "px";
       n.__el.style.top = n.pos[1] + "px";
+      placePeek(n);
       updateNodeLinks(g.id);
       S.dirty = true;
+      return;
+    }
+    if (g.type === "knife") {
+      g.pts.push([lx, ly]);
+      drawCutTrace(g.pts);
+      return;
+    }
+    if (g.type === "marquee") {
+      updateMarquee(lx, ly);
       return;
     }
     if (g.type === "link") {
@@ -775,11 +949,140 @@
     }
   }
 
+  function drawCutTrace(pts) {
+    if (cutEl) cutEl.setAttribute("points", pts.map((p) => p[0] + "," + p[1]).join(" "));
+  }
+
+  /** Sample the same bezier the renderer draws, in screen pixels. */
+  function linkScreenPoints(l) {
+    const a = endpoint(l, "out");
+    const b = endpoint(l, "in");
+    if (!a || !b) return null;
+    const dx = Math.max(28, Math.abs(b[0] - a[0]) * 0.45);
+    const p0 = a, p1 = [a[0] + dx, a[1]], p2 = [b[0] - dx, b[1]], p3 = b;
+    const out = [];
+    for (let i = 0; i <= 24; i++) {
+      const t = i / 24, mt = 1 - t;
+      const x = mt * mt * mt * p0[0] + 3 * mt * mt * t * p1[0] + 3 * mt * t * t * p2[0] + t * t * t * p3[0];
+      const y = mt * mt * mt * p0[1] + 3 * mt * mt * t * p1[1] + 3 * mt * t * t * p2[1] + t * t * t * p3[1];
+      out.push([x * S.view.z + S.view.x, y * S.view.z + S.view.y]);
+    }
+    return out;
+  }
+
+  function segDist(px, py, ax, ay, bx, by) {
+    const vx = bx - ax, vy = by - ay;
+    const len = vx * vx + vy * vy;
+    let t = len ? ((px - ax) * vx + (py - ay) * vy) / len : 0;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (ax + vx * t), py - (ay + vy * t));
+  }
+
+  const CUT_RADIUS = 18;
+
+  function hitLinks(pts) {
+    const hits = new Set();
+    S.links.forEach((l) => {
+      const samples = linkScreenPoints(l);
+      if (!samples) return;
+      for (const sp of samples) {
+        if (pts.length === 1) {
+          if (Math.hypot(sp[0] - pts[0][0], sp[1] - pts[0][1]) <= CUT_RADIUS) { hits.add(l.id); return; }
+          continue;
+        }
+        for (let i = 1; i < pts.length; i++) {
+          if (segDist(sp[0], sp[1], pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]) <= CUT_RADIUS) {
+            hits.add(l.id);
+            return;
+          }
+        }
+      }
+    });
+    return hits;
+  }
+
+  function finishCut() {
+    const cur = g;
+    hideCutTrace();
+    if (!cur || !cur.pts || !cur.pts.length) return;
+    const hits = hitLinks(cur.pts);
+    if (!hits.size) { if (!emptyTapExit()) toast("这一刀没碰到连线", true); return; }
+    lastEmptyTap = 0;
+    pushUndo("切断 " + hits.size + " 根连线", { kind: "links", links: snapLinks() });
+    for (const id of hits) S.links.delete(id);
+    S.dirty = true;
+    render();
+    updateTitle();
+    toast("切断了 " + hits.size + " 根连线");
+  }
+
+  function updateMarquee(x, y) {
+    const cur = g;
+    if (!cur) return;
+    cur.x1 = x;
+    cur.y1 = y;
+    const left = Math.min(cur.x0, x), top = Math.min(cur.y0, y);
+    const w = Math.abs(x - cur.x0), h = Math.abs(y - cur.y0);
+    if (marqueeEl) {
+      marqueeEl.style.left = left + "px";
+      marqueeEl.style.top = top + "px";
+      marqueeEl.style.width = w + "px";
+      marqueeEl.style.height = h + "px";
+    }
+    if (w > 6 || h > 6) selectMany(nodesInRect(left, top, w, h));
+  }
+
+  function nodesInRect(left, top, w, h) {
+    const z = S.view.z;
+    const x1 = (left - S.view.x) / z, y1 = (top - S.view.y) / z;
+    const x2 = (left + w - S.view.x) / z, y2 = (top + h - S.view.y) / z;
+    const out = [];
+    S.nodes.forEach((n) => {
+      const nh = (n.__el && n.__el.offsetHeight) || 90;
+      if (n.pos[0] < x2 && n.pos[0] + nodeWidth(n) > x1 &&
+          n.pos[1] < y2 && n.pos[1] + nh > y1) out.push(n.id);
+    });
+    return out;
+  }
+
+  let lastEmptyTap = 0;
+
+  /** Two taps on empty canvas within 320ms leave the tool. Returns true when
+   *  the tool was left, so the caller can skip its normal tap behaviour. */
+  function emptyTapExit() {
+    const now = Date.now();
+    if (now - lastEmptyTap < 400) {
+      lastEmptyTap = 0;
+      setTool("select");
+      return true;
+    }
+    lastEmptyTap = now;
+    return false;
+  }
+
+  function finishMarquee() {
+    const cur = g;
+    hideMarquee();
+    if (!cur) return;
+    const w = Math.abs(cur.x1 - cur.x0), h = Math.abs(cur.y1 - cur.y0);
+    if (w >= 6 || h >= 6) {
+      return;
+    }
+    // tap on empty space: clear, and a second tap within 320ms leaves the tool
+    if (emptyTapExit()) return;
+    selectMany([]);
+    closeSheet();
+  }
+
   function onUp(e) {
     const had = ptr.size;
     ptr.delete(e.pointerId);
 
-    if (g && g.type === "link") {
+    if (g && g.type === "knife") {
+      finishCut();
+    } else if (g && g.type === "marquee") {
+      finishMarquee();
+    } else if (g && g.type === "link") {
       clearGhost();
       finishLink(e);
     } else if (g && g.type !== "pinch" && moved < 12 && Date.now() - t0 < 600) {
@@ -855,21 +1158,162 @@
 
   function selectNode(id) {
     S.sel = id;
+    selSet = id == null ? new Set() : new Set([id]);
     markSelection();
   }
 
+  function selectMany(ids) {
+    selSet = new Set(ids || []);
+    S.sel = selSet.size ? Array.from(selSet)[0] : null;
+    markSelection();
+  }
+
+  /* ------------------------------------------------------------- node preview */
+  /* A floating picture above the active node. The card only carries a 40px
+   * thumb, and opening the sheet to look at the image covers the graph - this
+   * keeps the canvas visible while you check what you are feeding in. */
+
+  let peekEl = null;
+  let peekFor = null;
+
+  function hidePeek() {
+    if (peekEl) { peekEl.remove(); peekEl = null; }
+    peekFor = null;
+  }
+
+  function peekSource(n) {
+    const img = imageWidget(n);
+    if (!img) return null;
+    const s = String(img);
+    const slash = s.lastIndexOf("/");
+    return {
+      filename: slash >= 0 ? s.slice(slash + 1) : s,
+      subfolder: slash >= 0 ? s.slice(0, slash) : "",
+      type: "input",
+    };
+  }
+
+  function placePeek(n) {
+    if (!peekEl) return;
+    const h = +(peekEl.dataset.h || 0);
+    peekEl.style.left = n.pos[0] + "px";
+    peekEl.style.top = (n.pos[1] - h - 12) + "px";
+  }
+
+  function updatePeek() {
+    const n = S.sel != null ? S.nodes.get(S.sel) : null;
+    const src = n && peekSource(n);
+    if (!src) { hidePeek(); return; }
+
+    // same node and same picture: only the position can have changed
+    if (peekEl && peekFor === n.id + "|" + src.filename) { placePeek(n); return; }
+
+    hidePeek();
+    const el = document.createElement("div");
+    el.className = "node-peek";
+    const im = document.createElement("img");
+    im.alt = "";
+    im.onload = () => {
+      const w = nodeWidth(n);
+      const h = Math.round(w * (im.naturalHeight / Math.max(1, im.naturalWidth)));
+      el.style.width = w + "px";
+      el.style.height = h + "px";
+      el.dataset.h = String(h);
+      placePeek(n);
+      el.classList.add("on");
+    };
+    im.onerror = () => { hidePeek(); };
+    im.src = thumbUrl(src, 360);
+    el.appendChild(im);
+    ($("#world") || document.body).appendChild(el);
+    peekEl = el;
+    peekFor = n.id + "|" + src.filename;
+    placePeek(n);
+  }
+
   function markSelection() {
-    $$(".node").forEach((el) => el.classList.toggle("sel", +el.dataset.id === S.sel));
+    $$(".node").forEach((el) => el.classList.toggle("sel", selSet.has(+el.dataset.id)));
     S.links.forEach((l) => {
-      if (l.__el) l.__el.classList.toggle("sel", S.sel != null && (l.origin === S.sel || l.target === S.sel));
+      if (l.__el) l.__el.classList.toggle("sel", selSet.has(l.origin) || selSet.has(l.target));
     });
+    updatePeek();
+    updateBatchBar();
+  }
+
+  /* --------------------------------------------------------------- batch bar */
+  /* Shown only when a marquee picked more than one node; a single selection
+   * keeps using the node sheet. */
+
+  function updateBatchBar() {
+    let bar = document.getElementById("batchBar");
+    if (selSet.size < 2) { if (bar) bar.remove(); return; }
+    if (!bar) {
+      bar = document.createElement("div");
+      bar.id = "batchBar";
+      bar.className = "batch-bar";
+      $("#viewport").appendChild(bar);
+    }
+    bar.innerHTML = "";
+    const label = document.createElement("span");
+    label.className = "bb-n";
+    label.textContent = selSet.size + " 个节点";
+    const del = document.createElement("button");
+    del.className = "btn small danger";
+    del.textContent = "删除";
+    del.onclick = () => deleteSelection();
+    const mute = document.createElement("button");
+    mute.className = "btn small";
+    mute.textContent = "静音";
+    mute.onclick = () => muteSelection();
+    const esc = document.createElement("button");
+    esc.className = "btn small ghost";
+    esc.textContent = "取消";
+    esc.onclick = () => selectMany([]);
+    bar.appendChild(label);
+    bar.appendChild(del);
+    bar.appendChild(mute);
+    bar.appendChild(esc);
+  }
+
+  function deleteSelection() {
+    const ids = Array.from(selSet);
+    if (!ids.length) return;
+    recordNodeDelete(ids);
+    const doomed = new Set(ids);
+    for (const id of ids) S.nodes.delete(id);
+    for (const l of Array.from(S.links.values())) {
+      if (doomed.has(l.origin) || doomed.has(l.target)) S.links.delete(l.id);
+    }
+    S.dirty = true;
+    selectMany([]);
+    closeSheet();
+    hidePeek();
+    render();
+    updateTitle();
+    toast("已删除 " + ids.length + " 个节点（可撤销）");
+  }
+
+  function muteSelection() {
+    const ids = Array.from(selSet);
+    if (!ids.length) return;
+    const allMuted = ids.every((id) => (S.nodes.get(id) || {}).mode === 2);
+    for (const id of ids) {
+      const n = S.nodes.get(id);
+      if (n) n.mode = allMuted ? 0 : 2;
+    }
+    S.dirty = true;
+    render();
+    updateTitle();
+    toast((allMuted ? "已取消静音 " : "已静音 ") + ids.length + " 个节点");
   }
 
   /* ==================================================================== sheet */
 
   function isLinked(n, name) {
-    for (const inp of n.inputs) if (inp.name === name && inp.link != null) return true;
-    return false;
+    const idx = n.inputs.findIndex((i) => i.name === name);
+    if (idx < 0) return false;
+    // S.links is authoritative; inputs[].link can lag behind a drag
+    return !!linkInto(n, idx) || n.inputs[idx].link != null;
   }
 
   /** Which node feeds an input, so the sheet can say "值来自 #123 Int (Full)". */
@@ -1558,12 +2002,14 @@
   }
 
   function deleteNode(id) {
-    S.nodes.delete(id);
+      recordNodeDelete([id]);
+      S.nodes.delete(id);
     for (const l of Array.from(S.links.values())) {
       if (l.origin === id || l.target === id) S.links.delete(l.id);
     }
     S.dirty = true;
     S.sel = null;
+    hidePeek();
     closeSheet();
     render();
     updateTitle();
@@ -2144,6 +2590,14 @@
       { label: "适应", sub: "缩放到看得见全图", run: fitAll },
       { label: "重排", sub: "按连线关系自动分层排列", run: arrangeCanvas },
       { label: "撤销重排", sub: "回到重排之前的位置", run: undoArrange, disabled: !lastLayout },
+      {
+        label: "撤销",
+        sub: undoStack.length ? "撤销：" + undoStack[undoStack.length - 1].label : "没有可撤销的操作",
+        run: undoOnce,
+        disabled: !undoStack.length,
+      },
+      { label: "框选工具", sub: "单指拖出选框，可批量拖动/删除/静音", run: () => setTool("marquee") },
+      { label: "切刀工具", sub: "划过连线切断，点一下切一根", run: () => setTool("knife") },
     ]);
   }
 
