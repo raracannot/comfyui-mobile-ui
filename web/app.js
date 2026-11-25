@@ -2562,11 +2562,33 @@
     if (!render) return;
     const def = render();
     openPanelRaw(def.title, def.action, def.body, def.actionFn);
+    /* Panels that need a live count or a second header action set these after
+     * building, since both belong to state the body owns. */
+    if (def.after) def.after();
+  }
+
+  /** The header's spare slots: a small count next to the title, and a second
+   *  text button before the primary one. Panels that do not use them get them
+   *  cleared, so a reused header cannot show the previous panel's label. */
+  function setPanelHead(opts) {
+    const o = opts || {};
+    const sub = $("#panelSub");
+    if (sub) {
+      sub.textContent = o.sub || "";
+      sub.hidden = !o.sub;
+    }
+    const act2 = $("#panelAction2");
+    if (act2) {
+      act2.textContent = o.action2 || "";
+      act2.onclick = o.action2Fn || null;
+      act2.hidden = !o.action2;
+    }
   }
 
   function openPanelRaw(title, actionLabel, build, actionFn) {
     if (typeof actionLabel === "function") { actionFn = actionLabel; actionLabel = ""; }
     $("#panelTitle").textContent = title;
+    setPanelHead(null);
     const act = $("#panelAction");
     act.textContent = actionLabel || "";
     act.onclick = actionLabel ? actionFn : null;
@@ -3430,35 +3452,38 @@
         const keyOf = (it) => it.type + "|" + it.subfolder + "|" + it.filename;
 
         b.innerHTML = "";
-        const tools = document.createElement("div");
-        tools.className = "gal-tools";
         const grid = document.createElement("div");
         grid.className = "grid";
         const bar = document.createElement("div");
         bar.className = "gal-bar";
 
-        tools.innerHTML = '<span class="gal-count"></span>';
-        const btnSel = document.createElement("button");
-        btnSel.className = "btn small";
         const btnAll = document.createElement("button");
         btnAll.className = "btn small";
-        tools.appendChild(btnSel);
-        tools.appendChild(btnAll);
+        btnAll.textContent = "全选";
+        btnAll.onclick = () => { for (const it of items) chosen.add(keyOf(it)); draw(); };
 
-        b.appendChild(tools);
+        /* The count and the 选择 toggle belong in the panel header: the row they
+         * used to sit in was a whole band of the screen for two words. */
+        const toggleSel = () => {
+          selecting = !selecting;
+          if (!selecting) chosen.clear();
+          draw();
+        };
+
         b.appendChild(grid);
         b.appendChild(bar);
 
         const refreshBar = () => {
-          tools.querySelector(".gal-count").textContent =
-            "共 " + total + " 项" + (items.length < total ? " · 已载入 " + items.length : "") +
-            (selecting ? " · 已选 " + chosen.size : "");
-          btnSel.textContent = selecting ? "取消选择" : "选择";
-          btnAll.textContent = selecting ? "全选" : "";
-          btnAll.style.display = selecting ? "" : "none";
+          setPanelHead({
+            sub: "共 " + total + " 项" + (items.length < total ? " · 已载入 " + items.length : "") +
+              (selecting ? " · 已选 " + chosen.size : ""),
+            action2: selecting ? "取消选择" : "选择",
+            action2Fn: toggleSel,
+          });
           bar.style.display = selecting ? "" : "none";
           bar.innerHTML = "";
           if (!selecting) return;
+          bar.appendChild(btnAll);
           const del = document.createElement("button");
           del.className = "btn small danger";
           del.style.flex = "1 1 0";
@@ -3488,16 +3513,6 @@
             grid.appendChild(cell);
           });
           refreshBar();
-        };
-
-        btnSel.onclick = () => {
-          selecting = !selecting;
-          if (!selecting) chosen.clear();
-          draw();
-        };
-        btnAll.onclick = () => {
-          for (const it of items) chosen.add(keyOf(it));
-          draw();
         };
 
         async function removeItems(keys) {

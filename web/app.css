@@ -438,7 +438,9 @@ input[type="range"]::-webkit-slider-thumb {
   border-bottom: 1px solid var(--line);
   min-height: 54px;
 }
-.panel-head h2 { flex: 1 1 auto; font-size: 15px; font-weight: 650; margin: 0; text-align: center; }
+.ph-title { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 0; }
+.ph-title h2 { font-size: 15px; font-weight: 650; margin: 0; text-align: center; }
+.panel-sub { font-size: 10.5px; line-height: 1.3; color: var(--dim2); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .text-btn {
   flex: 0 0 auto; min-width: var(--tap); height: var(--tap);
   border: 0; background: transparent; color: var(--accent);
