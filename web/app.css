@@ -971,3 +971,25 @@ body[data-tool="marquee"] .tool-chip .tc-dot { background: #6ea8fe; box-shadow: 
   border-color: #2f6b52 !important;
   color: #8ff0c4 !important;
 }
+/* 看原图的三段式：先用画廊已有的缩略图垫底（模糊），再换中等尺寸，
+   原图只在按下按钮时才去取 —— 一张 1024 的 PNG 是 1 MB，而 1600 的 WebP 只有 30 KB。 */
+.lb-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transition: filter .2s ease-out, transform .2s ease-out;
+}
+.lb-img.lb-blur {
+  filter: blur(14px);
+  transform: scale(1.04);
+}
+.lb-orig {
+  padding: 9px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--line2);
+  background: var(--surface2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+.lb-orig[disabled] { opacity: .5; }

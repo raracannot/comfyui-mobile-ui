@@ -4626,26 +4626,11 @@
 
     const stage = document.createElement("div");
     stage.className = "lb-stage";
-    stage.innerHTML = '<div class="lb-spin">正在加载原图…</div>';
 
     const isVid = /\.(mp4|webm|mov|mkv|avi)$/i.test(it.filename);
     const url = api("view?filename=" + encodeURIComponent(it.filename) +
       "&subfolder=" + encodeURIComponent(it.subfolder) +
       "&type=" + encodeURIComponent(it.type));
-
-    // The full file is requested here and nowhere else: the grid only ever
-    // pulls a thumbnail, so opening a picture is the one time it is paid for.
-    const media = document.createElement(isVid ? "video" : "img");
-    if (isVid) {
-      media.controls = true;
-      media.autoplay = true;
-      media.playsInline = true;
-    }
-    const show = () => { stage.innerHTML = ""; stage.appendChild(media); };
-    media.onload = show;
-    media.onloadeddata = show;
-    media.onerror = () => { stage.textContent = "加载失败"; };
-    media.src = url;
 
     const bar = document.createElement("div");
     bar.className = "lb-bar";
@@ -4658,8 +4643,75 @@
     close.textContent = "关闭";
     close.className = "lb-close";
     close.onclick = () => { if (!popOverlay("lightbox")) back.remove(); };
-    bar.appendChild(dl);
-    bar.appendChild(close);
+
+    if (isVid) {
+      stage.innerHTML = '<div class="lb-spin">正在加载视频…</div>';
+      const media = document.createElement("video");
+      media.controls = true;
+      media.autoplay = true;
+      media.playsInline = true;
+      media.onloadeddata = () => { stage.innerHTML = ""; stage.appendChild(media); };
+      media.onerror = () => { stage.textContent = "加载失败"; };
+      media.src = url;
+      bar.appendChild(dl);
+      bar.appendChild(close);
+    } else {
+      /* Three steps, each one visible:
+       *   1. the 320px thumb the grid already fetched - instant, softened
+       *   2. a 1600px WebP, usually 30-200 KB, sharp on any phone screen
+       *   3. the original file, only when asked for (1 MB here, 30x the above)
+       */
+      const img = document.createElement("img");
+      img.className = "lb-img lb-blur";
+      img.decoding = "async";
+      img.src = thumbUrl(it, 320);
+      stage.appendChild(img);
+
+      const orig = document.createElement("button");
+      orig.className = "lb-orig";
+      orig.textContent = "载入原图…";
+      orig.disabled = true;
+
+      const swap = (src) => {
+        img.src = src;
+        img.classList.remove("lb-blur");
+      };
+
+      const mid = new Image();
+      mid.decoding = "async";
+      mid.onload = () => {
+        swap(mid.src);
+        orig.disabled = false;
+        orig.textContent = "载入原图";
+      };
+      mid.onerror = () => {
+        // the medium size failed; fall back to the full file so the view works
+        img.classList.remove("lb-blur");
+        img.src = url;
+        orig.hidden = true;
+      };
+      mid.src = thumbUrl(it, 1600);
+
+      orig.onclick = () => {
+        orig.disabled = true;
+        orig.textContent = "载入原图…";
+        const full = new Image();
+        full.decoding = "async";
+        full.onload = () => {
+          img.src = full.src;
+          orig.textContent = "已是原图";
+        };
+        full.onerror = () => {
+          orig.textContent = "原图加载失败";
+          orig.disabled = false;
+        };
+        full.src = url;
+      };
+
+      bar.appendChild(orig);
+      bar.appendChild(dl);
+      bar.appendChild(close);
+    }
 
     back.appendChild(stage);
     back.appendChild(bar);
