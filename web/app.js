@@ -565,6 +565,7 @@
     S.links.set(id, {
       id, origin: outNode, oslot: outSlot, target: inNode, tslot: inSlot, type: outType,
     });
+    if (dst.inputs[inSlot]) dst.inputs[inSlot].link = id;
     S.dirty = true;
     render();
     updateTitle();
@@ -574,6 +575,8 @@
     for (const l of Array.from(S.links.values())) {
       if (l.target === inNode && l.tslot === inSlot) S.links.delete(l.id);
     }
+    const dst = S.nodes.get(inNode);
+    if (dst && dst.inputs[inSlot]) dst.inputs[inSlot].link = null;
     S.dirty = true;
     render();
     updateTitle();
@@ -922,11 +925,20 @@
     } else {
       const ws = MUConv.widgetSpecs(inf);
       let linkedCount = 0;
+      // a width/height pair becomes one control with presets and an aspect lock
+      const pair = resPair(ws) && !isLinked(n, "width") && !isLinked(n, "height")
+        ? resPair(ws) : null;
+      if (pair) body.appendChild(resolutionBlock(n, inf, pair, vals));
       ws.forEach((spec) => {
         const name = spec[0], st = spec[1], opts = spec[2] || {};
+        if (pair && (name === pair.w || name === pair.h)) return;
         if (isLinked(n, name)) {
           linkedCount++;
           body.appendChild(linkedField(id, n, name, opts));
+          return;
+        }
+        if (name === "sigmas" && specType(st) === "STRING") {
+          body.appendChild(field(name, sigmasEditor(n, inf, name, vals[name])));
           return;
         }
         const ctl = widgetControl(n, inf, name, st, opts, vals[name], false);
@@ -1053,6 +1065,24 @@
       b.style.marginTop = "8px";
       b.textContent = "🖼 可视化框选区域";
       b.onclick = () => openCropPicker(n);
+      body.appendChild(b);
+    }
+
+    if (padTarget(n) && upstreamImage(n)) {
+      const b = document.createElement("button");
+      b.className = "btn";
+      b.style.marginTop = "8px";
+      b.textContent = "📐 可视化扩边";
+      b.onclick = () => openPadPicker(n);
+      body.appendChild(b);
+    }
+
+    if (placeTarget(n) && linkedImageName(n, /dest|background|base/i)) {
+      const b = document.createElement("button");
+      b.className = "btn";
+      b.style.marginTop = "8px";
+      b.textContent = "🎯 选择贴图位置";
+      b.onclick = () => openPlacePicker(n);
       body.appendChild(b);
     }
 
@@ -2972,10 +3002,18 @@
     return null;
   }
 
+  /* S.links is the source of truth for wiring: a drag must not leave
+   * inputs[].link stale, or "already wired" and "upstream image" both lie. */
+  function linkInto(n, idx) {
+    for (const l of S.links.values()) if (l.target === n.id && l.tslot === idx) return l;
+    return null;
+  }
+
   function upstreamImage(n) {
-    for (const inp of n.inputs) {
-      if (inp.link == null || !/IMAGE/.test(String(inp.type || ""))) continue;
-      const l = S.links.get(inp.link);
+    for (let idx = 0; idx < n.inputs.length; idx++) {
+      const inp = n.inputs[idx];
+      if (!/IMAGE/.test(String(inp.type || ""))) continue;
+      const l = linkInto(n, idx) || (inp.link != null ? S.links.get(inp.link) : null);
       const src = l && S.nodes.get(l.origin);
       if (!src) continue;
       const v = values(src);
@@ -3184,6 +3222,547 @@
         });
       });
     } catch (_) {}
+  }
+
+  /* ========================================================= resolution control */
+  /* A width/height pair is a choice, not a dial: dragging a 64–16384 slider to
+   * land on 1024 is the wrong instrument. Presets + an aspect lock + numbers. */
+
+  const RES_PRESETS = [
+    [1024, 1024], [896, 1152], [1152, 896], [832, 1216], [1216, 832],
+    [1328, 1328], [1280, 720], [720, 1280], [1024, 768],
+  ];
+
+  /** Best guess at the resolution the loaded model wants, from its file name. */
+  function modelHint() {
+    const pats = [
+      [/z[-_ ]?image/i, 1024, 1024, "Z-Image"],
+      [/qwen/i, 1328, 1328, "Qwen-Image"],
+      [/flux/i, 1024, 1024, "Flux"],
+      [/sdxl|sd_?xl|sd3/i, 1024, 1024, "SDXL / SD3"],
+      [/h3|minimax|wan|hunyuan|video/i, 1280, 720, "视频模型"],
+    ];
+    for (const n of S.nodes.values()) {
+      const inf = S.oi[n.type];
+      if (!inf) continue;
+      let v;
+      try { v = MUConv.getValues(n, inf); } catch (_) { continue; }
+      for (const key of ["ckpt_name", "unet_name", "model_name", "gguf_name", "base_model"]) {
+        const s = v[key];
+        if (typeof s !== "string" || !s) continue;
+        for (const [re, w, h, label] of pats) {
+          if (re.test(s)) return { w, h, label };
+        }
+      }
+    }
+    return null;
+  }
+
+  /* widgetSpecs hands back the raw INPUT_TYPES entry, so the type is spec[0] */
+  function specType(st) {
+    if (Array.isArray(st)) return Array.isArray(st[0]) ? "COMBO" : st[0];
+    return st;
+  }
+
+  function resPair(ws) {
+    const byName = new Map(ws.map((s) => [s[0], s[1]]));
+    const ok = (nm) => {
+      const t = specType(byName.get(nm));
+      return t === "INT" || t === "FLOAT";
+    };
+    if (!ok("width") || !ok("height")) return null;
+    return { w: "width", h: "height" };
+  }
+
+  function resolutionBlock(n, inf, pair, vals) {
+    const box = document.createElement("div");
+    box.className = "field res-block";
+    const lab = document.createElement("label");
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = "分辨率";
+    lab.appendChild(nm);
+    box.appendChild(lab);
+
+    let w = Math.round(+vals[pair.w] || 512);
+    let h = Math.round(+vals[pair.h] || 512);
+    let locked = true;
+
+    const chips = document.createElement("div");
+    chips.className = "res-chips";
+    box.appendChild(chips);
+
+    const row = document.createElement("div");
+    row.className = "res-row";
+    const mkNum = (val) => {
+      const i = document.createElement("input");
+      i.type = "number";
+      i.min = "16";
+      i.step = "8";
+      i.value = val;
+      i.inputMode = "numeric";
+      return i;
+    };
+    const wIn = mkNum(w);
+    const hIn = mkNum(h);
+    const lock = document.createElement("button");
+    lock.className = "res-lock on";
+    lock.title = "锁定宽高比";
+    lock.textContent = "🔒";
+    wIn.setAttribute("aria-label", "宽度");
+    hIn.setAttribute("aria-label", "高度");
+    wIn.style.cssText = "flex:1 1 0;width:auto";
+    hIn.style.cssText = "flex:1 1 0;width:auto";
+    row.appendChild(wIn);
+    row.appendChild(lock);
+    row.appendChild(hIn);
+    box.appendChild(row);
+
+    const note = document.createElement("div");
+    note.className = "res-note";
+    box.appendChild(note);
+
+    const hint = modelHint();
+
+    const apply = (nw, nh, changed) => {
+      nw = Math.max(16, Math.round(nw));
+      nh = Math.max(16, Math.round(nh));
+      if (locked) {
+        /* keep the aspect ratio, and snap to multiples of 8: diffusion models
+         * are trained on aligned sizes and odd numbers produce seams */
+        if (changed === "w") nh = Math.max(16, Math.round((nw * h) / Math.max(1, w) / 8) * 8);
+        else if (changed === "h") nw = Math.max(16, Math.round((nh * w) / Math.max(1, h) / 8) * 8);
+      }
+      w = nw;
+      h = nh;
+      wIn.value = w;
+      hIn.value = h;
+      MUConv.setValue(n, inf, pair.w, w);
+      MUConv.setValue(n, inf, pair.h, h);
+      S.dirty = true;
+      updateNodePreview(n.id);
+      updateTitle();
+      paint();
+    };
+
+    const paint = () => {
+      const gcd = (a, b) => (b ? gcd(b, a % b) : a);
+      const g = gcd(w, h) || 1;
+      note.textContent = w + " × " + h + "  ·  " + (w / g) + ":" + (h / g) +
+        (hint ? "  ·  建议 " + hint.w + "×" + hint.h + "（" + hint.label + "）" : "");
+    };
+
+    const drawChips = () => {
+      chips.innerHTML = "";
+      RES_PRESETS.forEach(([pw, ph]) => {
+        const c = document.createElement("button");
+        c.className = "res-chip" + (pw === w && ph === h ? " on" : "");
+        c.textContent = pw + "×" + ph;
+        c.onclick = () => apply(pw, ph, "");
+        chips.appendChild(c);
+      });
+      if (hint) {
+        const c = document.createElement("button");
+        c.className = "res-chip hint";
+        c.textContent = "用建议 " + hint.w + "×" + hint.h;
+        c.onclick = () => apply(hint.w, hint.h, "");
+        chips.appendChild(c);
+      }
+    };
+    drawChips();
+    paint();
+
+    wIn.onchange = () => { drawChips(); apply(+wIn.value || w, h, "w"); };
+    hIn.onchange = () => { drawChips(); apply(w, +hIn.value || h, "h"); };
+    lock.onclick = () => {
+      locked = !locked;
+      lock.className = "res-lock" + (locked ? " on" : "");
+      lock.textContent = locked ? "🔒" : "🔓";
+      toast(locked ? "已锁定宽高比" : "可自由改宽高");
+    };
+    return box;
+  }
+
+  /* ============================================================ sigma sequence */
+  /* A comma separated decreasing list is a sequence, not a string: typing
+   * "1, 0.5, 0.2" on a phone keyboard is where runs start failing validation. */
+
+  function sigmasEditor(n, inf, name, cur) {
+    const box = document.createElement("div");
+    const row = document.createElement("div");
+    row.className = "sig-row";
+    const note = document.createElement("div");
+    note.className = "sig-note";
+    let parts = String(cur || "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (!parts.length) parts = ["1", "0.5"];
+
+    const commit = () => {
+      MUConv.setValue(n, inf, name, parts.join(", "));
+      S.dirty = true;
+      updateNodePreview(n.id);
+      updateTitle();
+    };
+    const validate = () => {
+      const nums = parts.map(Number);
+      let msg = "";
+      let bad = false;
+      if (nums.some((x) => !isFinite(x) || x <= 0 || x > 1)) {
+        msg = "每个值都要在 (0, 1] 之间";
+        bad = true;
+      } else {
+        for (let i = 1; i < nums.length; i++) {
+          if (nums[i] >= nums[i - 1]) {
+            msg = "必须严格递减：" + nums[i - 1] + " → " + nums[i];
+            bad = true;
+            break;
+          }
+        }
+      }
+      note.textContent = bad ? msg
+        : nums.length + " 步 · " + nums[0] + " 降到 " + nums[nums.length - 1];
+      note.className = "sig-note" + (bad ? " bad" : "");
+    };
+    const draw = () => {
+      row.innerHTML = "";
+      parts.forEach((p, i) => {
+        const inp = document.createElement("input");
+        inp.type = "number";
+        inp.step = "0.01";
+        inp.min = "0";
+        inp.max = "1";
+        inp.value = p;
+        inp.onchange = () => { parts[i] = inp.value; commit(); validate(); };
+        row.appendChild(inp);
+      });
+      const add = document.createElement("button");
+      add.className = "btn small";
+      add.textContent = "＋";
+      add.onclick = () => {
+        const last = Number(parts[parts.length - 1]) || 0.5;
+        parts.push(String(Math.max(0.01, +(last / 2).toFixed(3))));
+        commit();
+        draw();
+        validate();
+      };
+      const del = document.createElement("button");
+      del.className = "btn small ghost";
+      del.textContent = "－";
+      del.onclick = () => {
+        if (parts.length <= 1) return;
+        parts.pop();
+        commit();
+        draw();
+        validate();
+      };
+      row.appendChild(add);
+      row.appendChild(del);
+    };
+    draw();
+    validate();
+    box.appendChild(row);
+    box.appendChild(note);
+    return box;
+  }
+
+  /* ============================================================== pad picker */
+  /* ImagePadForOutpaint is the crop picker backwards: the image sits in the
+   * middle and you pull the four edges outwards. */
+
+  function padTarget(n) {
+    const have = new Set(MUConv.widgetSpecs(info(n)).map((s) => s[0]));
+    if (!(have.has("left") && have.has("top") && have.has("right") && have.has("bottom"))) return null;
+    return { l: "left", t: "top", r: "right", b: "bottom" };
+  }
+
+  function openPadPicker(n) {
+    const inf = info(n);
+    const keys = padTarget(n);
+    const src = upstreamImage(n);
+    if (!src) { toast("上游不是「加载图像」，没法预览原图", true); return; }
+
+    const vals = values(n);
+    let pad = {
+      l: Math.max(0, +vals[keys.l] || 0), t: Math.max(0, +vals[keys.t] || 0),
+      r: Math.max(0, +vals[keys.r] || 0), b: Math.max(0, +vals[keys.b] || 0),
+    };
+
+    const back = document.createElement("div");
+    back.className = "crop-back";
+    back.innerHTML =
+      '<div class="crop-top">正在加载原图…</div>' +
+      '<div class="crop-stage pad-stage"><img class="crop-img" alt="">' +
+      '<div class="pad-frame"><i data-k="l"></i><i data-k="t"></i><i data-k="r"></i><i data-k="b"></i></div>' +
+      '</div><div class="crop-bar"></div>';
+    document.body.appendChild(back);
+
+    const top = back.querySelector(".crop-top");
+    const stage = back.querySelector(".crop-stage");
+    const img = back.querySelector(".crop-img");
+    const frame = back.querySelector(".pad-frame");
+    const bar = back.querySelector(".crop-bar");
+    let scale = 1;
+    let applyBtn = null;
+
+    const close = () => { window.removeEventListener("resize", layout); back.remove(); };
+    pushOverlay("crop", close);
+
+    function layout() {
+      const r = stage.getBoundingClientRect();
+      const iw = img.naturalWidth || 1;
+      const ih = img.naturalHeight || 1;
+      // leave room on every side for the padding to grow into
+      scale = Math.min((r.width * 0.42) / iw, (r.height * 0.42) / ih);
+      img.style.width = iw * scale + "px";
+      img.style.height = ih * scale + "px";
+      img.style.left = (r.width - iw * scale) / 2 + "px";
+      img.style.top = (r.height - ih * scale) / 2 + "px";
+      paint();
+    }
+
+    function paint() {
+      const r = stage.getBoundingClientRect();
+      const iw = img.naturalWidth || 1;
+      const ih = img.naturalHeight || 1;
+      const left = (r.width - iw * scale) / 2 - pad.l * scale;
+      const tpy = (r.height - ih * scale) / 2 - pad.t * scale;
+      const wpx = (iw + pad.l + pad.r) * scale;
+      const hpx = (ih + pad.t + pad.b) * scale;
+      frame.style.left = left + "px";
+      frame.style.top = tpy + "px";
+      frame.style.width = wpx + "px";
+      frame.style.height = hpx + "px";
+      top.textContent = "左 " + pad.l + "   上 " + pad.t + "   右 " + pad.r + "   下 " + pad.b +
+        "    原图 " + iw + " × " + ih;
+    }
+
+    img.onload = () => { layout(); if (applyBtn) applyBtn.disabled = false; };
+    img.onerror = () => { top.textContent = "原图加载失败：" + src.filename + "（不在 input/ 里）"; };
+    img.src = api("view?filename=" + encodeURIComponent(src.filename) + "&type=input");
+    window.addEventListener("resize", layout);
+
+    let drag = null;
+    frame.addEventListener("pointerdown", (e) => {
+      drag = { k: (e.target.dataset && e.target.dataset.k) || "", px: e.clientX, py: e.clientY,
+               start: Object.assign({}, pad) };
+      try { frame.setPointerCapture(e.pointerId); } catch (_) {}
+      e.preventDefault();
+    });
+    frame.addEventListener("pointermove", (e) => {
+      if (!drag || !drag.k) return;
+      const dx = (e.clientX - drag.px) / scale;
+      const dy = (e.clientY - drag.py) / scale;
+      const iw = img.naturalWidth || 1;
+      const ih = img.naturalHeight || 1;
+      if (drag.k === "l") pad.l = clamp(Math.round(drag.start.l - dx), 0, iw);
+      if (drag.k === "r") pad.r = clamp(Math.round(drag.start.r + dx), 0, iw);
+      if (drag.k === "t") pad.t = clamp(Math.round(drag.start.t - dy), 0, ih);
+      if (drag.k === "b") pad.b = clamp(Math.round(drag.start.b + dy), 0, ih);
+      paint();
+    });
+    const stop = () => { drag = null; };
+    frame.addEventListener("pointerup", stop);
+    frame.addEventListener("pointercancel", stop);
+
+    function apply() {
+      if (!img.naturalWidth) { toast("原图没加载成功，没法框选", true); return; }
+      MUConv.setValue(n, inf, keys.l, pad.l);
+      MUConv.setValue(n, inf, keys.t, pad.t);
+      MUConv.setValue(n, inf, keys.r, pad.r);
+      MUConv.setValue(n, inf, keys.b, pad.b);
+      S.dirty = true;
+      if (!popOverlay("crop")) close();
+      render();
+      openSheet(n.id);
+      updateTitle();
+      toast("已扩边 左" + pad.l + " 上" + pad.t + " 右" + pad.r + " 下" + pad.b);
+    }
+
+    const mk = (label, cls, fn) => {
+      const b2 = document.createElement("button");
+      b2.className = "crop-btn" + (cls ? " " + cls : "");
+      b2.textContent = label;
+      b2.onclick = fn;
+      bar.appendChild(b2);
+      return b2;
+    };
+    mk("归零", "", () => { pad = { l: 0, t: 0, r: 0, b: 0 }; paint(); });
+    mk("1:1", "", () => {
+      const iw = img.naturalWidth || 1;
+      const ih = img.naturalHeight || 1;
+      const side = Math.max(iw, ih);
+      pad = { l: Math.round((side - iw) / 2), r: Math.round((side - iw) / 2),
+              t: Math.round((side - ih) / 2), b: Math.round((side - ih) / 2) };
+      paint();
+    });
+    mk("取消", "", () => { if (!popOverlay("crop")) close(); });
+    applyBtn = mk("应用", "primary", apply);
+    applyBtn.disabled = true;
+  }
+
+  /* ============================================================ place picker */
+  /* ImageCompositeMasked pastes `source` onto `destination` at (x, y). Picking
+   * that point from two number fields is guesswork; drag the ghost instead. */
+
+  function placeTarget(n) {
+    const have = new Set(MUConv.widgetSpecs(info(n)).map((s) => s[0]));
+    if (!(have.has("x") && have.has("y"))) return null;
+    const idx = n.inputs.findIndex((i) => String(i.type) === "IMAGE" && /dest/i.test(i.name) &&
+      (linkInto(n, n.inputs.indexOf(i)) || i.link != null));
+    if (idx < 0) return null;
+    return { x: "x", y: "y", dst: n.inputs[idx].name };
+  }
+
+  function linkedImageName(n, slotRe) {
+    let l = null;
+    for (let idx = 0; idx < n.inputs.length; idx++) {
+      const inp = n.inputs[idx];
+      if (!/IMAGE/.test(String(inp.type || "")) || !slotRe.test(inp.name)) continue;
+      l = linkInto(n, idx) || (inp.link != null ? S.links.get(inp.link) : null);
+      if (l) break;
+    }
+    const src = l && S.nodes.get(l.origin);
+    if (!src) return null;
+    const v = values(src);
+    return typeof v.image === "string" ? v.image : null;
+  }
+
+  function openPlacePicker(n) {
+    const inf = info(n);
+    const keys = placeTarget(n);
+    const dstName = linkedImageName(n, /dest|background|base/i);
+    if (!dstName) { toast("目标图不是「加载图像」直连，没法预览", true); return; }
+    const srcName = linkedImageName(n, /^source$|src/i);
+
+    const vals = values(n);
+    let pos = { x: Math.round(+vals[keys.x] || 0), y: Math.round(+vals[keys.y] || 0) };
+
+    const back = document.createElement("div");
+    back.className = "crop-back";
+    back.innerHTML =
+      '<div class="crop-top">正在加载目标图…</div>' +
+      '<div class="crop-stage"><img class="crop-img" alt=""><div class="place-box"></div></div>' +
+      '<div class="crop-bar"></div>';
+    document.body.appendChild(back);
+
+    const top = back.querySelector(".crop-top");
+    const stage = back.querySelector(".crop-stage");
+    const img = back.querySelector(".crop-img");
+    const box = back.querySelector(".place-box");
+    const bar = back.querySelector(".crop-bar");
+    let scale = 1;
+    let sw = 0;
+    let sh = 0;
+
+    const close = () => { window.removeEventListener("resize", layout); back.remove(); };
+    pushOverlay("crop", close);
+
+    function layout() {
+      const r = stage.getBoundingClientRect();
+      const iw = img.naturalWidth || 1;
+      const ih = img.naturalHeight || 1;
+      scale = Math.min(r.width / iw, r.height / ih);
+      img.style.width = iw * scale + "px";
+      img.style.height = ih * scale + "px";
+      img.style.left = (r.width - iw * scale) / 2 + "px";
+      img.style.top = (r.height - ih * scale) / 2 + "px";
+      paint();
+    }
+
+    function paint() {
+      const r = stage.getBoundingClientRect();
+      const iw = img.naturalWidth || 1;
+      const ih = img.naturalHeight || 1;
+      const ox = (r.width - iw * scale) / 2;
+      const oy = (r.height - ih * scale) / 2;
+      const w = (sw || iw / 3) * scale;
+      const h = (sh || ih / 3) * scale;
+      box.style.left = ox + pos.x * scale + "px";
+      box.style.top = oy + pos.y * scale + "px";
+      box.style.width = w + "px";
+      box.style.height = h + "px";
+      top.textContent = "x " + pos.x + "   y " + pos.y +
+        (sw ? "    贴图 " + sw + " × " + sh : "    贴图尺寸未知") +
+        "    目标 " + iw + " × " + ih;
+    }
+
+    img.onload = () => {
+      layout();
+      if (!srcName) { if (applyBtn) applyBtn.disabled = false; return; }
+      const probe = new Image();
+      probe.onload = () => { sw = probe.naturalWidth; sh = probe.naturalHeight; paint();
+        if (applyBtn) applyBtn.disabled = false; };
+      probe.onerror = () => { if (applyBtn) applyBtn.disabled = false; };
+      probe.src = api("view?filename=" + encodeURIComponent(srcName) + "&type=input");
+    };
+    img.onerror = () => { top.textContent = "目标图加载失败：" + dstName; };
+    img.src = api("view?filename=" + encodeURIComponent(dstName) + "&type=input");
+    window.addEventListener("resize", layout);
+
+    let drag = null;
+    const begin = (e) => {
+      drag = { px: e.clientX, py: e.clientY, start: { x: pos.x, y: pos.y } };
+      try { box.setPointerCapture(e.pointerId); } catch (_) {}
+      e.preventDefault();
+    };
+    const move = (e) => {
+      if (!drag) return;
+      const iw = img.naturalWidth || 1;
+      const ih = img.naturalHeight || 1;
+      pos = {
+        x: Math.round(clamp(drag.start.x + (e.clientX - drag.px) / scale, 0, iw)),
+        y: Math.round(clamp(drag.start.y + (e.clientY - drag.py) / scale, 0, ih)),
+      };
+      paint();
+    };
+    const stop = () => { drag = null; };
+    box.addEventListener("pointerdown", begin);
+    box.addEventListener("pointermove", move);
+    box.addEventListener("pointerup", stop);
+    box.addEventListener("pointercancel", stop);
+    stage.addEventListener("pointerdown", (e) => {
+      // tapping elsewhere on the image puts the top-left corner there
+      if (e.target !== stage && e.target !== img) return;
+      const r = stage.getBoundingClientRect();
+      const iw = img.naturalWidth || 1;
+      const ox = (r.width - iw * scale) / 2;
+      const oy = (r.height - (img.naturalHeight || 1) * scale) / 2;
+      pos = {
+        x: Math.round(clamp((e.clientX - r.left - ox) / scale, 0, iw)),
+        y: Math.round(clamp((e.clientY - r.top - oy) / scale, 0, img.naturalHeight || 1)),
+      };
+      paint();
+    });
+
+    function apply() {
+      MUConv.setValue(n, inf, keys.x, pos.x);
+      MUConv.setValue(n, inf, keys.y, pos.y);
+      S.dirty = true;
+      if (!popOverlay("crop")) close();
+      render();
+      openSheet(n.id);
+      updateTitle();
+      toast("已设为 x " + pos.x + "  y " + pos.y);
+    }
+
+    let applyBtn = null;
+    const mk = (label, cls, fn) => {
+      const b2 = document.createElement("button");
+      b2.className = "crop-btn" + (cls ? " " + cls : "");
+      b2.textContent = label;
+      b2.onclick = fn;
+      bar.appendChild(b2);
+      return b2;
+    };
+    mk("归零", "", () => { pos = { x: 0, y: 0 }; paint(); });
+    mk("居中", "", () => {
+      const iw = img.naturalWidth || 1;
+      const ih = img.naturalHeight || 1;
+      pos = { x: Math.round((iw - (sw || iw / 3)) / 2), y: Math.round((ih - (sh || ih / 3)) / 2) };
+      paint();
+    });
+    mk("取消", "", () => { if (!popOverlay("crop")) close(); });
+    applyBtn = mk("应用", "primary", apply);
+    applyBtn.disabled = true;
   }
 
   function pickImage(cb) {
