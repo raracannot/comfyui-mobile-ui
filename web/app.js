@@ -2750,6 +2750,7 @@
    * instead of replacing each other. */
 
   let promptTarget = null;
+  let promptRedraw = null;
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
   async function loadPrompts(force) {
@@ -2761,6 +2762,54 @@
       S.prompts = S.prompts || { rev: 0, items: [], file: "" };
     }
     return S.prompts;
+  }
+
+
+  /* ---- optimistic library edits --------------------------------------------
+   * Deleting a fragment should not wait for the round trip. The change is
+   * applied to S.prompts at once, the request goes out behind whatever write
+   * is already in flight (so two quick deletes cannot race on rev), and a
+   * failure rolls the row back. */
+
+  let promptSaveChain = Promise.resolve();
+
+  /** Persist whatever S.prompts currently holds; keep our items, take the rev. */
+  async function persistInPlace() {
+    const cur = S.prompts;
+    if (!cur) return true;
+    try {
+      const res = await fetch(rel("api/prompts"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rev: cur.rev, items: cur.items }),
+      });
+      if (res.status === 409) {
+        const out = await res.json();
+        S.prompts = { rev: out.rev, items: out.items || [], file: cur.file };
+        toast("词库已被其他设备改过，已刷新", true);
+        if (promptRedraw) promptRedraw();
+        return false;
+      }
+      const out = await res.json();
+      if (out.error) { toast(out.error, true); return false; }
+      cur.rev = out.rev;          // items are already what we sent
+      return true;
+    } catch (e) {
+      toast("保存失败：" + e.message, true);
+      loadPrompts(true).then(() => { if (promptRedraw) promptRedraw(); });
+      return false;
+    }
+  }
+
+  /** Queue a save for the change just made in memory; roll back if it fails. */
+  function applyPromptsLocal(rollback) {
+    if (!S.prompts) return;
+    promptSaveChain = promptSaveChain
+      .then(async () => {
+        const ok = await persistInPlace();
+        if (!ok && rollback) rollback();
+      })
+      .catch(() => {});
   }
 
   async function persistPrompts(data) {
@@ -2919,25 +2968,38 @@
         del.className = "btn danger";
         del.style.marginTop = "14px";
         del.textContent = "删除这个片段";
-        del.onclick = async () => {
+        del.onclick = () => {
           if (!confirm("删除「" + (draft.name || "未命名") + "」？")) return;
-          const data = await loadPrompts(true);
-          data.items = data.items.filter((x) => x.id !== draft.id);
-          if (await persistPrompts(data)) { toast("已删除"); openPanel("prompts"); }
+          const data = S.prompts;
+          if (data) {
+            const at = data.items.findIndex((x) => x.id === draft.id);
+            if (at >= 0) data.items.splice(at, 1);
+          }
+          toast("已删除");
+          openPanel("prompts");
+          applyPromptsLocal();
         };
         b.appendChild(del);
       }
-    }, async () => {
+    }, () => {
       if (!textIn) return;
       draft.text = textIn.value;
       if (!draft.text.trim()) { toast("内容不能为空", true); return; }
       draft.name = (nameIn && nameIn.value.trim()) ||
         draft.text.replace(/\s+/g, " ").slice(0, 18) || "未命名";
       draft.group = (groupIn && groupIn.value.trim()) || "未分组";
-      const data = await loadPrompts(true);
-      const i = data.items.findIndex((x) => x.id === draft.id);
-      if (i >= 0) data.items[i] = draft; else data.items.unshift(draft);
-      if (await persistPrompts(data)) { toast("已保存"); openPanel("prompts"); }
+
+      /* Apply locally and leave the editor at once; the request follows.
+       * The panel repaints from memory, so saving no longer waits on the
+       * round trip before it closes. */
+      const data = S.prompts;
+      if (data) {
+        const i = data.items.findIndex((x) => x.id === draft.id);
+        if (i >= 0) data.items[i] = draft; else data.items.unshift(draft);
+      }
+      toast("已保存");
+      openPanel("prompts");
+      applyPromptsLocal();
     });
   }
 
@@ -3126,25 +3188,43 @@
           }, true);
         }
 
-        async function removeItem(it) {
-          const data = await loadPrompts();
+        function removeItem(it) {
+          const data = S.prompts;
+          if (!data) return;
           const idx = data.items.findIndex((x) => x.id === it.id);
           if (idx < 0) return;
+
+          /* Optimistic: the row goes away this frame, the request follows.
+           * Waiting for the round trip is what made deleting feel slow. */
           const removed = data.items.splice(idx, 1)[0];
-          if (!(await persistPrompts(data))) { draw(); return; }
-          items = (S.prompts && S.prompts.items) || items.filter((x) => x.id !== it.id);
+          items = data.items;
           draw();
+          applyPromptsLocal(() => {
+            data.items.splice(Math.min(idx, data.items.length), 0, removed);
+            items = data.items;
+            draw();
+            toast("删除没保存成功，已恢复", true);
+          });
           toastAction("已删除「" + (removed.name || "未命名") + "」", "撤销", () => restoreItem(removed, idx));
         }
 
-        async function restoreItem(item, idx) {
-          const data = await loadPrompts();
-          data.items.splice(Math.min(idx, data.items.length), 0, item);
-          if (!(await persistPrompts(data))) return;
-          items = (S.prompts && S.prompts.items) || data.items;
+        function restoreItem(item, idx) {
+          const data = S.prompts;
+          if (!data) return;
+          const at = Math.min(idx, data.items.length);
+          data.items.splice(at, 0, item);
+          items = data.items;
           draw();
+          applyPromptsLocal(() => {
+            const k = data.items.findIndex((x) => x.id === item.id);
+            if (k >= 0) data.items.splice(k, 1);
+            items = data.items;
+            draw();
+            toast("撤销没保存成功，已回退", true);
+          });
           toast("已恢复「" + (item.name || "未命名") + "」");
         }
+
 
         async function start() {
           /* One request on a cold open, one paint. With a cache already in
@@ -3162,6 +3242,7 @@
           }
         }
 
+        promptRedraw = draw;   // so a 409 on a background save can refresh us
         search.oninput = () => {
           q = search.value;
           clearTimeout(debounce);
