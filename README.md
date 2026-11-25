@@ -197,7 +197,31 @@ http://<电脑的 tailscale IP>:8188/mobile/
 
 ---
 
-## 八、HTTP 接口
+## 八、提示词种子库
+
+`_dev/seed_prompts.json` 收录 34 条按实际使用场景整理的提示词：
+
+| 分组 | 条数 | 内容 |
+|---|---|---|
+| 视频运镜 | 5 | 推进 / 环绕 / 横移 / 升降 / 手持跟拍 |
+| 视频动作 | 5 | 静帧活化 / 转身回眸 / 行走 / 环境流动 / 无缝循环 |
+| 摄影写实 | 5 | 棚拍人像 / 自然光 / 电影夜景 / 产品微距 / 室内空间 |
+| 风格化 | 4 | 日系胶片 / 国潮插画 / 3D 渲染 / 水墨 |
+| 人像写真 | 4 | 职业形象 / 生活感 / 复古港风 / 二次元头像 |
+| 图像修复 | 4 | 老照片 / 细节增强 / 去水印 / 色彩校正 |
+| 文字排版 | 3 | 中文海报 / 电商卖点 / 图书封面 |
+| 负面提示 | 4 | 通用质量 / 人像 / 电商文字 / 视频稳定性 |
+
+导入到本机词库（自动去重、自动备份、原子写入，重复导入不会产生副本）：
+
+```bash
+python _dev/import_prompts.py _dev/seed_prompts.json            # 合并
+python _dev/import_prompts.py _dev/seed_prompts.json --dry-run  # 只看会加什么
+```
+
+也接受 Wanvas 画布导出的格式（`title` / `content` / `category`），字段自动识别，不需要手工转换。
+
+## 九、HTTP 接口
 
 除页面本身，还提供几个辅助接口（都以 `/mobile/` 为前缀）：
 
@@ -218,7 +242,7 @@ http://<电脑的 tailscale IP>:8188/mobile/
 
 ---
 
-## 九、兼容性
+## 十、兼容性
 
 界面完全是 `object_info` 驱动的：不认识的节点也能显示、连线、跑，只是参数名没有中文。
 
@@ -239,7 +263,7 @@ http://<电脑的 tailscale IP>:8188/mobile/
 
 ---
 
-## 十、开发
+## 十一、开发
 
 ```
 custom_nodes/mobile_ui/
@@ -272,7 +296,7 @@ node _dev/test_convert.js _dev/object_info.json <ui.json> <api.json> ...
 
 ---
 
-## 十一、常见问题
+## 十二、常见问题
 
 | 现象 | 原因 / 处理 |
 |---|---|
@@ -286,7 +310,7 @@ node _dev/test_convert.js _dev/object_info.json <ui.json> <api.json> ...
 
 ---
 
-## 十二、加载速度
+## 十三、加载速度
 
 首次打开约 **0.6 秒 / 380 KB**，之后每次约 **0.6 秒 / 7 KB**（实测数据，手机端会慢一些）。
 
@@ -302,6 +326,6 @@ node _dev/test_convert.js _dev/object_info.json <ui.json> <api.json> ...
 > 如果改了 `web/` 下的文件却发现手机还是旧界面：`index.html` 里的 `?v=` 没升。静态资源是 immutable 缓存，必须靠版本号才能失效。
 
 ---
-## 十二、许可
+## 十四、许可
 
 MIT，见 [LICENSE](LICENSE)。随便用、随便改、随便分发。

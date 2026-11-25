@@ -156,3 +156,9 @@ Exit codes are meaningful: `0` pass, non-zero fail. Use them as gates.
 
 The node is self-contained: **delete `custom_nodes/mobile_ui/` and restart** to return to a
 stock ComfyUI. Nothing outside that folder is modified at install time.
+
+## 提示词资产
+
+- `_dev/seed_prompts.json` 是随仓库分发的种子库（34 条，8 个分组），改它就是在改分发给别人的内容。
+- `_dev/import_prompts.py` 是合并工具：按 `text` 去重、自动备份、`os.replace` 原子写入，同时接受本项目和 Wanvas 两种字段格式。**不要手写 prompts.json**，走这个脚本，否则容易漏掉 `rev` 自增或写坏文件。
+- 词库真实路径 `<ComfyUI>/user/default/mobile_ui/prompts.json`，不在仓库里；脚本用 `__file__` 推导，不依赖工作目录。
