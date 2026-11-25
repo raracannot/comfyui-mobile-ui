@@ -253,6 +253,7 @@
       else if (act === "add") openPanel("nodes");
       else if (act === "nodelist") openPanel("nodelist");
       else if (act === "gallery") openPanel("gallery");
+      else if (act === "prompts") openPanel("prompts");
     });
     const vp = $("#viewport");
     vp.addEventListener("pointerdown", onDown);
@@ -1245,7 +1246,10 @@
     el.value = cur == null ? "" : String(cur);
     el.onchange = () => commit(el.value);
     if (linked) el.disabled = true;
-    return wrapControl(el, opts, n, inf, name);
+    const box = wrapControl(el, opts, n, inf, name);
+    // long free text is where fragments get composed
+    if (long && !linked) addPromptTools(box, el, commit);
+    return box;
 
     function commit(v) {
       MUConv.setValue(n, inf, name, v);
@@ -1993,7 +1997,278 @@
     $("#panel").setAttribute("aria-hidden", "true");
   }
 
+  /* ============================================================ prompt library */
+  /* Fragments are *composed*, not applied as whole templates: a tap inserts at
+   * the caret of the field that was open, so "backlit" then "85mm" build up
+   * instead of replacing each other. */
+
+  let promptTarget = null;
+  const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+  async function loadPrompts(force) {
+    if (S.prompts && !force) return S.prompts;
+    try {
+      const r = await (await fetch(rel("api/prompts"))).json();
+      S.prompts = { rev: r.rev || 0, items: r.items || [], file: r.file || "" };
+    } catch (_) {
+      S.prompts = S.prompts || { rev: 0, items: [], file: "" };
+    }
+    return S.prompts;
+  }
+
+  async function persistPrompts(data) {
+    try {
+      const res = await fetch(rel("api/prompts"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rev: data.rev, items: data.items }),
+      });
+      if (res.status === 409) {
+        const cur = await res.json();
+        S.prompts = { rev: cur.rev, items: cur.items || [], file: (S.prompts || {}).file };
+        toast("词库已被其他设备改过，已刷新，请重试", true);
+        return false;
+      }
+      const out = await res.json();
+      if (out.error) { toast(out.error, true); return false; }
+      S.prompts = { rev: out.rev, items: out.items, file: (S.prompts || {}).file };
+      return true;
+    } catch (e) {
+      toast("保存失败：" + e.message, true);
+      return false;
+    }
+  }
+
+  /** Insert at the caret of the text field the library was opened from. */
+  function insertFragment(text) {
+    const t = promptTarget;
+    if (t && t.el && t.el.isConnected) {
+      const el = t.el;
+      const start = el.selectionStart == null ? el.value.length : el.selectionStart;
+      const end = el.selectionEnd == null ? start : el.selectionEnd;
+      const before = el.value.slice(0, start);
+      const after = el.value.slice(end);
+      /* Keep the result readable: "a portrait" + fragment needs a separator,
+       * "a portrait, " does not, and "a portrait," needs only the space. */
+      let sep = "";
+      if (before) {
+        if (/[,，;；]\s*$/.test(before)) sep = /\s$/.test(before) ? "" : " ";
+        else if (/\s$/.test(before)) sep = "";
+        else sep = ", ";
+      }
+      const ins = sep + text;
+      el.value = before + ins + after;
+      t.commit(el.value);
+      el.focus();
+      const pos = (before + ins).length;
+      try { el.setSelectionRange(pos, pos); } catch (_) {}
+      closePanel();
+      toast("已插入片段");
+      return;
+    }
+    // opened from the dock: nothing to insert into, so hand it to the clipboard
+    const done = () => toast("已复制片段");
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, () => toast("复制失败", true));
+      return;
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;opacity:0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); done(); } catch (_) { toast("复制失败", true); }
+    ta.remove();
+  }
+
+  async function saveFragment(text) {
+    const t = String(text || "").trim();
+    if (!t) { toast("这个字段是空的", true); return; }
+    const data = await loadPrompts(true);
+    const name = t.replace(/\s+/g, " ").slice(0, 18).replace(/\s\S*$/, "") || t.slice(0, 18);
+    data.items.unshift({
+      id: uid(), name, text: t, group: "未分组", tags: [], created: Date.now(), used: 0,
+    });
+    if (await persistPrompts(data)) toast("已存为片段「" + name + "」");
+  }
+
+  function addPromptTools(box, el, commit) {
+    const row = document.createElement("div");
+    row.className = "pg-tools";
+    const ins = document.createElement("button");
+    ins.className = "btn small";
+    ins.textContent = "📚 插入片段";
+    ins.onclick = () => { promptTarget = { el, commit }; openPanel("prompts"); };
+    const save = document.createElement("button");
+    save.className = "btn small ghost";
+    save.textContent = "💾 存为片段";
+    save.onclick = () => saveFragment(el.value);
+    row.appendChild(ins);
+    row.appendChild(save);
+    box.appendChild(row);
+  }
+
+  function editFragment(item) {
+    const isNew = !item;
+    const draft = item
+      ? Object.assign({}, item)
+      : { id: uid(), name: "", text: "", group: "未分组", tags: [], created: Date.now(), used: 0 };
+
+    // the build callback and the save callback run at different times, so the
+    // inputs have to live in this scope rather than inside build()
+    let nameIn = null;
+    let groupIn = null;
+    let textIn = null;
+
+    openPanelRaw(isNew ? "新建片段" : "编辑片段", "保存", (b) => {
+      const field = (label, value, multi, ph) => {
+        const box = document.createElement("div");
+        box.className = "field";
+        const lab = document.createElement("label");
+        const nm = document.createElement("span");
+        nm.className = "nm";
+        nm.textContent = label;
+        lab.appendChild(nm);
+        box.appendChild(lab);
+        const el = document.createElement(multi ? "textarea" : "input");
+        if (!multi) el.type = "text";
+        el.value = value || "";
+        if (ph) el.placeholder = ph;
+        box.appendChild(el);
+        b.appendChild(box);
+        return el;
+      };
+      const nameIn2 = field("名称", draft.name, false, "比如：午后逆光");
+      const groupIn2 = field("分组", draft.group, false, "比如：光照 / 镜头 / 画质");
+      const textIn2 = field("内容", draft.text, true, "要插入的提示词片段");
+      nameIn = nameIn2;
+      groupIn = groupIn2;
+      textIn = textIn2;
+
+      if (!isNew) {
+        const del = document.createElement("button");
+        del.className = "btn danger";
+        del.style.marginTop = "14px";
+        del.textContent = "删除这个片段";
+        del.onclick = async () => {
+          if (!confirm("删除「" + (draft.name || "未命名") + "」？")) return;
+          const data = await loadPrompts(true);
+          data.items = data.items.filter((x) => x.id !== draft.id);
+          if (await persistPrompts(data)) { toast("已删除"); openPanel("prompts"); }
+        };
+        b.appendChild(del);
+      }
+    }, async () => {
+      if (!textIn) return;
+      draft.text = textIn.value;
+      if (!draft.text.trim()) { toast("内容不能为空", true); return; }
+      draft.name = (nameIn && nameIn.value.trim()) ||
+        draft.text.replace(/\s+/g, " ").slice(0, 18) || "未命名";
+      draft.group = (groupIn && groupIn.value.trim()) || "未分组";
+      const data = await loadPrompts(true);
+      const i = data.items.findIndex((x) => x.id === draft.id);
+      if (i >= 0) data.items[i] = draft; else data.items.unshift(draft);
+      if (await persistPrompts(data)) { toast("已保存"); openPanel("prompts"); }
+    });
+  }
+
   const PANELS = {
+    prompts() {
+      const body = (b) => {
+        let q = "";
+        let group = "全部";
+
+        const search = document.createElement("input");
+        search.className = "search";
+        search.placeholder = "搜索片段 / 分组…";
+        b.appendChild(search);
+
+        const chips = document.createElement("div");
+        chips.className = "pg-chips";
+        b.appendChild(chips);
+
+        const list = document.createElement("div");
+        list.className = "pg-list";
+        b.appendChild(list);
+
+        const note = document.createElement("div");
+        note.className = "empty";
+        b.appendChild(note);
+
+        const draw = async () => {
+          const data = await loadPrompts(true);
+          const items = data.items || [];
+          const groups = ["全部"].concat([...new Set(items.map((x) => x.group || "未分组"))]);
+          chips.innerHTML = "";
+          groups.forEach((g) => {
+            const c = document.createElement("button");
+            c.className = "pg-chip" + (g === group ? " on" : "");
+            c.textContent = g;
+            c.onclick = () => { group = g; draw(); };
+            chips.appendChild(c);
+          });
+
+          const key = q.trim().toLowerCase();
+          const shown = items.filter((it) =>
+            (group === "全部" || (it.group || "未分组") === group) &&
+            (!key || (it.name + " " + it.text + " " + (it.tags || []).join(" "))
+              .toLowerCase().includes(key)));
+
+          list.innerHTML = "";
+          if (!shown.length) {
+            note.style.display = "";
+            note.innerHTML = items.length
+              ? "没有匹配的片段。"
+              : "词库还是空的。<br>点开一个文本节点 →「💾 存为片段」，或者点右上角「新建」。";
+            return;
+          }
+          note.style.display = "none";
+
+          shown.forEach((it) => {
+            const row = document.createElement("div");
+            row.className = "pg-item";
+
+            const head = document.createElement("div");
+            head.className = "pg-head";
+            const nm = document.createElement("span");
+            nm.className = "pg-name";
+            nm.textContent = it.name || "未命名";
+            const g = document.createElement("span");
+            g.className = "pg-group";
+            g.textContent = it.group || "未分组";
+            head.appendChild(nm);
+            head.appendChild(g);
+
+            const txt = document.createElement("div");
+            txt.className = "pg-text";
+            txt.textContent = it.text;
+
+            const tools = document.createElement("div");
+            tools.className = "pg-row";
+            const ins = document.createElement("button");
+            ins.className = "btn small";
+            ins.textContent = "插入";
+            ins.onclick = () => insertFragment(it.text);
+            const ed = document.createElement("button");
+            ed.className = "btn small ghost";
+            ed.textContent = "编辑";
+            ed.onclick = () => editFragment(it);
+            tools.appendChild(ins);
+            tools.appendChild(ed);
+
+            row.appendChild(head);
+            row.appendChild(txt);
+            row.appendChild(tools);
+            list.appendChild(row);
+          });
+        };
+
+        search.oninput = () => { q = search.value; draw(); };
+        draw();
+      };
+      return { title: "词库", body, action: "新建", actionFn: () => editFragment(null) };
+    },
+
     workflows() {
       const body = (b) => {
         const search = document.createElement("input");

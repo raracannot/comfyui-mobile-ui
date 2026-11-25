@@ -106,6 +106,18 @@ Key server behaviours worth knowing before editing:
   usable on mobile data.
 - `/mobile/api/delete` only touches `output/` and `temp/`, and on Windows uses
   `SHFileOperationW` with `FOF_ALLOWUNDO` so files land in the Recycle Bin.
+- `/mobile/api/prompts` is the snippet library — **user data**, stored at
+  `<COMFYUI>/user/default/mobile_ui/prompts.json`:
+
+  ```json
+  { "rev": 3, "items": [ { "id": "…", "name": "午后逆光", "text": "…",
+                           "group": "光照", "tags": [], "created": 0 } ] }
+  ```
+
+  Writes are atomic (temp file + `os.replace`), so a crash cannot truncate the file.
+  `POST` carries the `rev` it was based on; a mismatch returns **409 with the current
+  document** instead of overwriting, so two phones cannot silently clobber each other.
+  Never POST a list built from memory without first `GET`ting its `rev`.
 
 ---
 

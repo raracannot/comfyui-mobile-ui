@@ -691,6 +691,106 @@ async def list_outputs(request):
     return web.json_response({"items": items[:limit], "total": len(items)})
 
 
+# --------------------------------------------------------------------------- prompts
+# Snippet library. Fragments are combined by inserting at the caret, so the file
+# is a plain list rather than a tree of templates. The file lives under user/ so
+# it survives plugin updates and can be edited by hand.
+
+PROMPT_DIR = os.path.join(_user_dir(), "default", "mobile_ui")
+PROMPT_FILE = os.path.join(PROMPT_DIR, "prompts.json")
+
+
+def _read_prompts():
+    if not os.path.isfile(PROMPT_FILE):
+        return {"rev": 0, "items": []}
+    try:
+        with open(PROMPT_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        LOG.warning("mobile_ui: prompts.json unreadable (%s), starting empty", exc)
+        return {"rev": 0, "items": []}
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        return {"rev": 0, "items": []}
+    data["rev"] = int(data.get("rev") or 0)
+    return data
+
+
+def _write_prompts(data):
+    """Write via a temp file and rename: two phones saving at once would
+    otherwise truncate the file mid-write."""
+    os.makedirs(PROMPT_DIR, exist_ok=True)
+    tmp = PROMPT_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, PROMPT_FILE)
+
+
+def _clean_item(it):
+    if not isinstance(it, dict):
+        return None
+    text = str(it.get("text") or "")[:20000]
+    if not text.strip():
+        return None
+    tags = it.get("tags")
+    if not isinstance(tags, list):
+        tags = []
+    return {
+        "id": str(it.get("id") or "")[:64] or ("p%x" % int(time.time() * 1000)),
+        "name": str(it.get("name") or "")[:120],
+        "text": text,
+        "group": str(it.get("group") or "未分组")[:60],
+        "tags": [str(t)[:40] for t in tags[:12]],
+        "created": int(it.get("created") or 0),
+        "used": int(it.get("used") or 0),
+    }
+
+
+async def get_prompts(request):
+    data = _read_prompts()
+    return web.json_response({
+        "rev": data.get("rev", 0),
+        "items": data.get("items", []),
+        "file": PROMPT_FILE,
+    })
+
+
+async def save_prompts(request):
+    bad = _guard(request)
+    if bad is not None:
+        return bad
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+
+    items = body.get("items")
+    if not isinstance(items, list):
+        return web.json_response({"error": "items 必须是数组"}, status=400)
+
+    cur = _read_prompts()
+    base = body.get("rev")
+    if base is not None and int(base) != int(cur.get("rev", 0)):
+        # another device wrote first; hand back its version so the client can
+        # reload instead of silently overwriting it
+        return web.json_response({
+            "error": "conflict",
+            "rev": cur.get("rev", 0),
+            "items": cur.get("items", []),
+        }, status=409)
+
+    clean = [c for c in (_clean_item(it) for it in items[:5000]) if c]
+    data = {"rev": int(cur.get("rev", 0)) + 1, "items": clean}
+    try:
+        _write_prompts(data)
+    except Exception as exc:
+        LOG.error("mobile_ui: cannot write prompts: %s", exc)
+        return web.json_response({"error": "写入失败: %s" % exc}, status=500)
+
+    return web.json_response({"rev": data["rev"], "items": clean})
+
+
 # --------------------------------------------------------------------------- debug
 # A phone is hard to develop against: no console, no inspector. This channel
 # lets the page report what it is actually showing, and lets a bounded set of
@@ -781,6 +881,8 @@ def _register():
     routes.get("/mobile/api/thumb")(thumb)
     routes.post("/mobile/api/delete")(delete_media)
     routes.get("/mobile/api/outputs")(list_outputs)
+    routes.get("/mobile/api/prompts")(get_prompts)
+    routes.post("/mobile/api/prompts")(save_prompts)
 
     routes.post("/mobile/api/debug/report")(debug_report)
     routes.get("/mobile/api/debug/state")(debug_state)
