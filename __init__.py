@@ -819,6 +819,195 @@ def _scan_outputs():
     return items
 
 
+def _png_text(path, want=("prompt", "workflow")):
+    """ComfyUI writes the whole graph and its parameters into the PNG as tEXt.
+
+    Reading it back is what makes an output traceable: which model, which seed,
+    which prompt. JPEG/WebP outputs carry nothing, and that is not an error.
+    """
+    out = {}
+    try:
+        with open(path, "rb") as f:
+            if f.read(8) != b"\x89PNG\r\n\x1a\n":
+                return out
+            while True:
+                head = f.read(8)
+                if len(head) < 8:
+                    break
+                length = int.from_bytes(head[:4], "big")
+                ctype = head[4:8]
+                data = f.read(length)
+                f.read(4)
+                if ctype == b"tEXt":
+                    key, _, value = data.partition(b"\x00")
+                    key = key.decode("latin-1")
+                    if key in want:
+                        out[key] = value.decode("latin-1", "replace")
+                elif ctype == b"iTXt":
+                    parts = data.split(b"\x00", 5)
+                    key = parts[0].decode("latin-1")
+                    if key in want and len(parts) >= 6:
+                        out[key] = parts[5].decode("utf-8", "replace")
+                elif ctype == b"IEND":
+                    break
+    except Exception:
+        pass
+    return out
+
+
+def _follow_text(prompt, ref, depth=0):
+    """Follow a link until a string 'text' input is found."""
+    if depth > 8 or not isinstance(ref, list) or not ref:
+        return None
+    node = prompt.get(str(ref[0]))
+    if not isinstance(node, dict):
+        return None
+    inputs = node.get("inputs") or {}
+    # TextEncode* uses "text", the Qwen edit encoders use "prompt", string
+    # primitives use "value"
+    for key in ("text", "prompt", "string", "value"):
+        value = inputs.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    for value in inputs.values():
+        if isinstance(value, list):
+            got = _follow_text(prompt, value, depth + 1)
+            if got:
+                return got
+    return None
+
+
+def _summarize(prompt):
+    models, loras = [], []
+    seed = steps = cfg = sampler = scheduler = width = height = None
+    positive = negative = None
+
+    for node in prompt.values():
+        if not isinstance(node, dict):
+            continue
+        ins = node.get("inputs") or {}
+        for key in ("ckpt_name", "unet_name", "model_name", "vae_name", "clip_name", "clip_name1", "clip_name2"):
+            value = ins.get(key)
+            if isinstance(value, str) and value not in models:
+                models.append(value)
+        if isinstance(ins.get("lora_name"), str) and ins["lora_name"] not in loras:
+            loras.append(ins["lora_name"])
+        for key in ("seed", "noise_seed"):
+            if isinstance(ins.get(key), (int, float)):
+                seed = int(ins[key])
+        for key in ("steps", "num_inference_steps"):
+            if isinstance(ins.get(key), (int, float)) and steps is None:
+                steps = int(ins[key])
+        if isinstance(ins.get("cfg"), (int, float)):
+            cfg = float(ins["cfg"])
+        if isinstance(ins.get("sampler_name"), str):
+            sampler = ins["sampler_name"]
+        if isinstance(ins.get("scheduler"), str):
+            scheduler = ins["scheduler"]
+        if isinstance(ins.get("width"), int) and isinstance(ins.get("height"), int):
+            width, height = ins["width"], ins["height"]
+        if positive is None and "positive" in ins:
+            positive = _follow_text(prompt, ins["positive"])
+        # A negative that runs through ConditioningZeroOut is deliberately
+        # empty; following it would land on the positive prompt instead
+        if negative is None and "negative" in ins:
+            ref = ins["negative"]
+            target = prompt.get(str(ref[0])) if isinstance(ref, list) and ref else None
+            if isinstance(target, dict) and "ZeroOut" in str(target.get("class_type", "")):
+                negative = ""
+            else:
+                negative = _follow_text(prompt, ref)
+        # SamplerCustomAdvanced feeds BasicGuider.conditioning instead
+        if positive is None and "conditioning" in ins:
+            positive = _follow_text(prompt, ins["conditioning"])
+        # CFGGuider names its two sides explicitly
+        if negative is None and "negative" in ins:
+            negative = _follow_text(prompt, ins["negative"])
+
+    # graphs with no sampler-side links (or none at all): take the encoders in order
+    if positive is None or negative is None:
+        texts = []
+        for node in prompt.values():
+            if not isinstance(node, dict):
+                continue
+            ins = node.get("inputs") or {}
+            for key in ("text", "prompt", "string", "value"):
+                value = ins.get(key)
+                if isinstance(value, str) and value.strip():
+                    texts.append(value)
+                    break
+        if positive is None and texts:
+            positive = texts[0]
+        if negative is None and len(texts) > 1:
+            negative = texts[1]
+
+    if negative and negative == positive:
+        negative = ""      # the same string on both sides means one was misread
+
+    return {
+        "models": models[:6],
+        "loras": loras[:8],
+        "seed": seed,
+        "steps": steps,
+        "cfg": cfg,
+        "sampler": sampler,
+        "scheduler": scheduler,
+        "width": width,
+        "height": height,
+        "positive": (positive or "")[:2000],
+        "negative": (negative or "")[:1000],
+    }
+
+
+async def get_provenance(request):
+    """What made this file: models, seed, sampler, prompts."""
+    bad = _guard(request)
+    if bad is not None:
+        return bad
+    try:
+        import folder_paths
+        root = folder_paths.get_directory_by_type("output")
+    except Exception:
+        return web.json_response({"error": "找不到输出目录"}, status=500)
+
+    filename = request.query.get("filename", "")
+    subfolder = request.query.get("subfolder", "")
+    if not filename:
+        return web.json_response({"error": "缺少 filename"}, status=400)
+
+    try:
+        full = _confine(root, (subfolder + "/" + filename) if subfolder else filename)
+    except ValueError:
+        return web.json_response({"error": "非法路径"}, status=400)
+    if not os.path.isfile(full):
+        return web.json_response({"error": "文件不存在"}, status=404)
+
+    chunks = _png_text(full)
+    if not chunks.get("prompt"):
+        return web.json_response({
+            "error": "这个文件里没有内嵌参数",
+            "hint": "只有 PNG 会写入参数；JPEG / WebP 没有。",
+        }, status=404)
+
+    try:
+        prompt = json.loads(chunks["prompt"])
+    except Exception:
+        return web.json_response({"error": "参数解析失败"}, status=500)
+
+    summary = _summarize(prompt)
+    summary["nodes"] = len(prompt)
+
+    out = {"summary": summary, "filename": filename, "subfolder": subfolder}
+    if request.query.get("full"):
+        out["prompt"] = prompt
+        if chunks.get("workflow"):
+            try:
+                out["workflow"] = json.loads(chunks["workflow"])
+            except Exception:
+                pass
+    return _json_ok(request, out)
+
+
 async def list_outputs(request):
     """A page of ComfyUI's output folder, newest first.
 
@@ -1211,6 +1400,7 @@ def _register():
     routes.get("/mobile/api/thumb")(thumb)
     routes.post("/mobile/api/delete")(delete_media)
     routes.get("/mobile/api/outputs")(list_outputs)
+    routes.get("/mobile/api/provenance")(get_provenance)
     routes.get("/mobile/api/prompts")(get_prompts)
     routes.post("/mobile/api/prompts")(save_prompts)
     routes.post("/mobile/api/prompts/ops")(prompt_ops)

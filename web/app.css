@@ -993,3 +993,59 @@ body[data-tool="marquee"] .tool-chip .tc-dot { background: #6ea8fe; box-shadow: 
   font-size: 12.5px;
 }
 .lb-orig[disabled] { opacity: .5; }
+/* ---------------------------------------------------------------- note reader */
+.note-read {
+  position: fixed;
+  inset: 0;
+  z-index: 78;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.nr-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: calc(var(--safe-t) + 10px) 12px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.nr-head b { flex: 1 1 auto; font-size: 14px; color: var(--text); }
+.nr-head .btn { flex: 0 0 auto; width: auto; padding: 7px 14px; }
+.nr-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 16px 16px calc(var(--safe-b) + 40px);
+  font-size: 14px;
+  line-height: 1.85;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+/* 生成参数：一屏读完，长提示词排在最后 */
+.prov-body { font-size: 13px; line-height: 1.7; }
+.prov-row {
+  display: flex;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+.prov-k {
+  flex: 0 0 68px;
+  color: var(--dim2);
+  font-size: 12px;
+}
+.prov-v {
+  flex: 1 1 auto;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.prov-empty { color: var(--dim); padding: 16px 0; }
+.prov-hint { color: var(--dim2); font-size: 12px; margin-top: 8px; }
+.prov-act { margin-top: 18px; }

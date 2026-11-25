@@ -1420,6 +1420,16 @@
         updateTitle();
       };
       body.appendChild(field("文本", t));
+
+      /* Notes are how these workflows document themselves - there are 54 of
+       * them across the library - and a 180px textarea in a sheet is not a
+       * way to read a page of parameters. */
+      const read = document.createElement("button");
+      read.className = "btn";
+      read.style.marginTop = "12px";
+      read.textContent = "📖 全屏阅读";
+      read.onclick = () => openNoteReader(t.value, n.type === "Note" ? "便签" : "说明文档");
+      body.appendChild(read);
     } else {
       const ws = MUConv.widgetSpecs(inf);
       let linkedCount = 0;
@@ -4640,6 +4650,150 @@
       "&type=" + encodeURIComponent(it.type) + "&w=" + (w || 320);
   }
 
+  /* A read-only full-screen view for MarkdownNote. The note is plain text as
+   * far as this UI is concerned: no markdown renderer, no styling guesses -
+   * just readable measure, spacing and selectable text. */
+  function openNoteReader(text, label) {
+    const back = document.createElement("div");
+    back.className = "note-read";
+
+    const head = document.createElement("div");
+    head.className = "nr-head";
+    const ttl = document.createElement("b");
+    ttl.textContent = label || "备注";
+    const copy = document.createElement("button");
+    copy.className = "btn small";
+    copy.textContent = "复制全文";
+    copy.onclick = () => {
+      const done = () => { copy.textContent = "已复制"; setTimeout(() => { copy.textContent = "复制全文"; }, 1200); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text || "").then(done, () => toast("复制失败", true));
+      } else {
+        toast("这个浏览器不支持复制", true);
+      }
+    };
+    const close = document.createElement("button");
+    close.className = "btn small ghost";
+    close.textContent = "关闭";
+    close.onclick = () => { if (!popOverlay("note")) back.remove(); };
+    head.appendChild(ttl);
+    head.appendChild(copy);
+    head.appendChild(close);
+
+    const body = document.createElement("div");
+    body.className = "nr-body";
+    body.textContent = (text || "").trim() || "（这条备注是空的）";
+
+    back.appendChild(head);
+    back.appendChild(body);
+    document.body.appendChild(back);
+    pushOverlay("note", () => { if (back.parentNode) back.remove(); });
+  }
+
+  /* What made this picture. ComfyUI leaves the graph and its parameters inside
+   * every PNG, so the answer is read off the file itself rather than guessed
+   * from whatever session happens to be running. */
+  async function openProvenance(it) {
+    const q = "?filename=" + encodeURIComponent(it.filename) +
+      "&subfolder=" + encodeURIComponent(it.subfolder) +
+      "&type=" + encodeURIComponent(it.type);
+
+    const back = document.createElement("div");
+    back.className = "note-read";
+    const head = document.createElement("div");
+    head.className = "nr-head";
+    const ttl = document.createElement("b");
+    ttl.textContent = "生成参数";
+    const close = document.createElement("button");
+    close.className = "btn small ghost";
+    close.textContent = "关闭";
+    close.onclick = () => { if (!popOverlay("prov")) back.remove(); };
+    head.appendChild(ttl);
+    head.appendChild(close);
+    const body = document.createElement("div");
+    body.className = "nr-body prov-body";
+    body.textContent = "读取中…";
+    back.appendChild(head);
+    back.appendChild(body);
+    document.body.appendChild(back);
+    pushOverlay("prov", () => { if (back.parentNode) back.remove(); });
+
+    let d = null;
+    try { d = await (await fetch(rel("api/provenance" + q))).json(); } catch (e) {}
+    if (!d || d.error) {
+      body.innerHTML = "";
+      const p = document.createElement("div");
+      p.className = "prov-empty";
+      p.textContent = (d && d.error) || "读取失败";
+      body.appendChild(p);
+      if (d && d.hint) {
+        const h = document.createElement("div");
+        h.className = "prov-hint";
+        h.textContent = d.hint;
+        body.appendChild(h);
+      }
+      return;
+    }
+
+    const s = d.summary || {};
+    const rows = [
+      ["模型", (s.models || []).join("\n") || "—"],
+      ["LoRA", (s.loras || []).join("\n") || "—"],
+      ["采样", [s.sampler, s.scheduler].filter(Boolean).join(" / ") || "—"],
+      ["步数 / CFG", (s.steps == null ? "—" : s.steps) + " 步 · CFG " + (s.cfg == null ? "—" : s.cfg)],
+      ["种子", s.seed == null ? "—" : String(s.seed)],
+      ["尺寸", s.width && s.height ? s.width + " × " + s.height : "—"],
+    ];
+    if (s.positive) rows.push(["正向", s.positive]);
+    if (s.negative) rows.push(["负向", s.negative]);
+
+    body.innerHTML = "";
+    rows.forEach(([k, v]) => {
+      const row = document.createElement("div");
+      row.className = "prov-row";
+      const kk = document.createElement("span");
+      kk.className = "prov-k";
+      kk.textContent = k;
+      const vv = document.createElement("span");
+      vv.className = "prov-v";
+      vv.textContent = v;
+      row.appendChild(kk);
+      row.appendChild(vv);
+      body.appendChild(row);
+    });
+
+    const act = document.createElement("div");
+    act.className = "prov-act";
+    const again = document.createElement("button");
+    again.className = "btn";
+    again.textContent = "用这套参数再跑一次";
+    again.onclick = async () => {
+      again.disabled = true;
+      again.textContent = "提交中…";
+      try {
+        const full = await (await fetch(rel("api/provenance" + q + "&full=1"))).json();
+        if (!full || !full.prompt) throw new Error("拿不到参数");
+        const res = await fetch(api("prompt"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt: full.prompt, client_id: S.clientId }),
+        });
+        const j = await res.json();
+        if (j.error) throw new Error(j.error.message || String(j.error));
+        S.running = j.prompt_id;
+        watchRun(j.prompt_id);
+        if (!popOverlay("prov")) back.remove();
+        toast("已按这张图的参数重新提交");
+      } catch (e) {
+        again.disabled = false;
+        again.textContent = "用这套参数再跑一次";
+        toast("提交失败：" + e.message, true);
+      }
+    };
+    act.appendChild(again);
+    body.appendChild(act);
+  }
+
   function lightbox(it) {
     const back = document.createElement("div");
     back.className = "lightbox";
@@ -4729,6 +4883,11 @@
       };
 
       bar.appendChild(orig);
+      const prov = document.createElement("button");
+      prov.className = "lb-orig";
+      prov.textContent = "参数";
+      prov.onclick = () => openProvenance(it);
+      bar.appendChild(prov);
       bar.appendChild(dl);
       bar.appendChild(close);
     }
